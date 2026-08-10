@@ -82,12 +82,31 @@ func (f *fakeMetadata) FetchWithUserAgent(_ context.Context, rawURL, _ string) (
 	return f.Fetch(context.Background(), rawURL)
 }
 
-type fakeLinks struct{}
+// fakeLinks matches nothing by default; tests that exercise the wrapper path
+// populate destinations with the resolution each tracked URL yields.
+type fakeLinks struct {
+	destinations map[string]string
+}
 
-func (f *fakeLinks) Match(_ string) bool { return false }
+func (f *fakeLinks) Match(rawURL string) bool {
+	_, ok := f.destinations[rawURL]
+	return ok
+}
 
-func (f *fakeLinks) Resolve(_ context.Context, _ string) (link.Resolution, bool, error) {
-	return link.Resolution{}, false, nil
+func (f *fakeLinks) Resolve(_ context.Context, rawURL string) (link.Resolution, bool, error) {
+	target, ok := f.destinations[rawURL]
+	if !ok {
+		return link.Resolution{}, false, nil
+	}
+	original, err := url.Parse(rawURL)
+	if err != nil {
+		return link.Resolution{}, false, err
+	}
+	destination, err := url.Parse(target)
+	if err != nil {
+		return link.Resolution{}, false, err
+	}
+	return link.Resolution{Original: original, Destination: destination}, true, nil
 }
 
 type fakePreviews struct {
@@ -139,8 +158,8 @@ func (f *fakeStore) Grandfather(_ context.Context, chatID, userID int64) error {
 	return nil
 }
 
-func (f *fakeStore) FindCanonical(_ context.Context, chatID int64, threadID int, senderID int64, rule, _, fingerprint string) (store.CanonicalAction, bool, error) {
-	key := canonicalKey{chatID: chatID, thread: threadID, userID: senderID, rule: rule, fp: fingerprint}
+func (f *fakeStore) FindCanonical(_ context.Context, chatID int64, threadID int, senderID int64, rule, behaviorVersion, fingerprint string) (store.CanonicalAction, bool, error) {
+	key := canonicalKey{chatID: chatID, thread: threadID, userID: senderID, rule: rule, version: behaviorVersion, fp: fingerprint}
 	if a, ok := f.canonicalActs[key]; ok {
 		return a, true, nil
 	}
@@ -148,7 +167,7 @@ func (f *fakeStore) FindCanonical(_ context.Context, chatID int64, threadID int,
 }
 
 func (f *fakeStore) CreateCanonical(_ context.Context, a store.CanonicalAction) (store.CanonicalAction, bool, error) {
-	key := canonicalKey{chatID: a.ChatID, thread: a.ThreadID, userID: a.UserID, rule: a.Rule, fp: a.Fingerprint}
+	key := canonicalKeyFor(a)
 	if existing, ok := f.canonicalActs[key]; ok {
 		return existing, false, nil
 	}
@@ -185,15 +204,35 @@ func (f *fakeStore) MarkOutboxErrorAfter(_ context.Context, _ int64, _ string, _
 }
 func (f *fakeStore) MarkOutboxDead(_ context.Context, _ int64, _ error) error { return nil }
 
+// canonicalKey mirrors the real store's
+// UNIQUE(chat_id, thread_id, user_id, rule, behavior_version, fingerprint).
+// behavior_version belongs here: without it the fake would suppress across a
+// version bump that the real schema treats as a distinct row.
 type canonicalKey struct {
-	chatID int64
-	thread int
-	userID int64
-	rule   string
-	fp     string
+	chatID  int64
+	thread  int
+	userID  int64
+	rule    string
+	version string
+	fp      string
+}
+
+func canonicalKeyFor(a store.CanonicalAction) canonicalKey {
+	return canonicalKey{
+		chatID:  a.ChatID,
+		thread:  a.ThreadID,
+		userID:  a.UserID,
+		rule:    a.Rule,
+		version: a.BehaviorVersion,
+		fp:      a.Fingerprint,
+	}
 }
 
 func newTestApp(tc *fakeTelegram, st *fakeStore, md *fakeMetadata, pv *fakePreviews) *action.Application {
+	return newTestAppWithLinks(tc, st, md, pv, &fakeLinks{})
+}
+
+func newTestAppWithLinks(tc *fakeTelegram, st *fakeStore, md *fakeMetadata, pv *fakePreviews, links *fakeLinks) *action.Application {
 	cfg := config.Config{
 		Moderation: config.ModerationConfig{NewcomerSandbox: config.Duration(48 * time.Hour)},
 		Metadata: config.MetadataConfig{
@@ -205,7 +244,7 @@ func newTestApp(tc *fakeTelegram, st *fakeStore, md *fakeMetadata, pv *fakePrevi
 			FacebookUserAgent: "test-fb",
 		},
 	}
-	return action.New(cfg, tc, st, md, &fakeLinks{}, pv, fakeNotice{}, time.Now)
+	return action.New(cfg, tc, st, md, links, pv, fakeNotice{}, time.Now)
 }
 
 func TestNewcomerShortCircuitsResolver(t *testing.T) {
@@ -346,6 +385,89 @@ func TestRepostReusesPendingOutboxItem(t *testing.T) {
 	}
 	if len(st.deleteRequested) > 0 {
 		t.Error("repost should not create new delete request")
+	}
+}
+
+// The google-wrapper -> google-share/google-amp rename changes a value stored
+// in canonical_actions.rule, so it must ship with a behaviorVersion bump.
+// The legacy row here is seeded at the *new* rule name and the old version: if
+// behaviorVersion were reverted to v0.1 the application would find it and
+// silently suppress, so this fails on a missing bump rather than on the rename.
+func TestGoogleWrapperSupersedesLegacyBehaviorVersion(t *testing.T) {
+	t.Parallel()
+	const (
+		wrapped = "https://share.google.com/abc"
+		target  = "https://news.example/article"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	links := &fakeLinks{destinations: map[string]string{wrapped: target}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     "look " + wrapped,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 5, Length: len(wrapped), URL: wrapped}},
+	}
+
+	legacy := store.CanonicalAction{
+		ID: 4242, ChatID: 1, UserID: 100,
+		Rule: "google-share", BehaviorVersion: "v0.1",
+		Fingerprint: moderation.Fingerprint(input, "google-share"),
+		Payload:     "legacy payload",
+	}
+	st.canonicalActs[canonicalKeyFor(legacy)] = legacy
+
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	var current store.CanonicalAction
+	for _, act := range st.canonicalActs {
+		if act.ID != legacy.ID {
+			current = act
+		}
+	}
+	if current.ID == 0 {
+		t.Fatal("no new canonical action created; the legacy v0.1 row was reused")
+	}
+	if current.BehaviorVersion == legacy.BehaviorVersion {
+		t.Fatalf("behavior version = %q; the rule rename must ship with a bump", current.BehaviorVersion)
+	}
+	if current.Rule != "google-share" {
+		t.Fatalf("rule = %q, want google-share", current.Rule)
+	}
+	if len(st.deleteRequested) == 0 {
+		t.Error("expected the wrapper message to be moderated rather than suppressed")
+	}
+}
+
+// The AMP host must be recorded under its own rule name so the two resolvers
+// keep separate suppression state.
+func TestGoogleAMPUsesItsOwnRuleName(t *testing.T) {
+	t.Parallel()
+	const (
+		wrapped = "https://amp.google.com/story"
+		target  = "https://news.example/article"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	links := &fakeLinks{destinations: map[string]string{wrapped: target}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     "look " + wrapped,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 5, Length: len(wrapped), URL: wrapped}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(st.canonicalActs) != 1 {
+		t.Fatalf("canonical actions = %d, want 1", len(st.canonicalActs))
+	}
+	for _, act := range st.canonicalActs {
+		if act.Rule != "google-amp" {
+			t.Fatalf("rule = %q, want google-amp", act.Rule)
+		}
 	}
 }
 
