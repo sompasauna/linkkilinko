@@ -72,11 +72,11 @@ func run(parent context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	googleShare, googleAMP, err := link.NewGoogleResolvers(metadataLinkFetcher{fetcher: metadataFetcher})
+	googleShare, amp, err := link.NewGoogleResolvers(metadataLinkFetcher{fetcher: metadataFetcher})
 	if err != nil {
 		return err
 	}
-	linkRegistry, err := link.NewRegistry(googleShare, googleAMP)
+	linkRegistry, err := link.NewRegistry(googleShare, amp)
 	if err != nil {
 		return err
 	}

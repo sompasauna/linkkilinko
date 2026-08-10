@@ -21,6 +21,7 @@ const (
 	testURLHost     = "example.com"
 	testEntityType  = "url"
 	testContentType = "text/html"
+	testShareRule   = "google-share"
 )
 
 type fakeTelegram struct {
@@ -88,9 +89,16 @@ type fakeLinks struct {
 	destinations map[string]string
 }
 
-func (f *fakeLinks) Match(rawURL string) bool {
+func (f *fakeLinks) MatchName(rawURL string) (string, bool) {
 	_, ok := f.destinations[rawURL]
-	return ok
+	if !ok {
+		return "", false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err == nil && (parsed.Hostname() == "www.google.com" || parsed.Hostname() == "amp.example.com") {
+		return "amp", true
+	}
+	return testShareRule, true
 }
 
 func (f *fakeLinks) Resolve(_ context.Context, rawURL string) (link.Resolution, bool, error) {
@@ -106,7 +114,8 @@ func (f *fakeLinks) Resolve(_ context.Context, rawURL string) (link.Resolution, 
 	if err != nil {
 		return link.Resolution{}, false, err
 	}
-	return link.Resolution{Original: original, Destination: destination}, true, nil
+	name, _ := f.MatchName(rawURL)
+	return link.Resolution{Original: original, Destination: destination, Resolver: name}, true, nil
 }
 
 type fakePreviews struct {
@@ -388,7 +397,7 @@ func TestRepostReusesPendingOutboxItem(t *testing.T) {
 	}
 }
 
-// The google-wrapper -> google-share/google-amp rename changes a value stored
+// Resolver rule-name changes affect values stored
 // in canonical_actions.rule, so it must ship with a behaviorVersion bump.
 // The legacy row here is seeded at the *new* rule name and the old version: if
 // behaviorVersion were reverted to v0.1 the application would find it and
@@ -396,7 +405,7 @@ func TestRepostReusesPendingOutboxItem(t *testing.T) {
 func TestGoogleWrapperSupersedesLegacyBehaviorVersion(t *testing.T) {
 	t.Parallel()
 	const (
-		wrapped = "https://share.google.com/abc"
+		wrapped = "https://share.google/abc"
 		target  = "https://news.example/article"
 	)
 	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
@@ -411,8 +420,8 @@ func TestGoogleWrapperSupersedesLegacyBehaviorVersion(t *testing.T) {
 
 	legacy := store.CanonicalAction{
 		ID: 4242, ChatID: 1, UserID: 100,
-		Rule: "google-share", BehaviorVersion: "v0.1",
-		Fingerprint: moderation.Fingerprint(input, "google-share"),
+		Rule: testShareRule, BehaviorVersion: "v0.1",
+		Fingerprint: moderation.Fingerprint(input, testShareRule),
 		Payload:     "legacy payload",
 	}
 	st.canonicalActs[canonicalKeyFor(legacy)] = legacy
@@ -433,7 +442,7 @@ func TestGoogleWrapperSupersedesLegacyBehaviorVersion(t *testing.T) {
 	if current.BehaviorVersion == legacy.BehaviorVersion {
 		t.Fatalf("behavior version = %q; the rule rename must ship with a bump", current.BehaviorVersion)
 	}
-	if current.Rule != "google-share" {
+	if current.Rule != testShareRule {
 		t.Fatalf("rule = %q, want google-share", current.Rule)
 	}
 	if len(st.deleteRequested) == 0 {
@@ -441,12 +450,12 @@ func TestGoogleWrapperSupersedesLegacyBehaviorVersion(t *testing.T) {
 	}
 }
 
-// The AMP host must be recorded under its own rule name so the two resolvers
+// AMP URLs must be recorded under their own rule name so the two resolvers
 // keep separate suppression state.
-func TestGoogleAMPUsesItsOwnRuleName(t *testing.T) {
+func TestAMPUsesItsOwnRuleName(t *testing.T) {
 	t.Parallel()
 	const (
-		wrapped = "https://amp.google.com/story"
+		wrapped = "https://www.google.com/amp/s/news.example/article"
 		target  = "https://news.example/article"
 	)
 	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
@@ -465,8 +474,8 @@ func TestGoogleAMPUsesItsOwnRuleName(t *testing.T) {
 		t.Fatalf("canonical actions = %d, want 1", len(st.canonicalActs))
 	}
 	for _, act := range st.canonicalActs {
-		if act.Rule != "google-amp" {
-			t.Fatalf("rule = %q, want google-amp", act.Rule)
+		if act.Rule != "amp" {
+			t.Fatalf("rule = %q, want amp", act.Rule)
 		}
 	}
 }

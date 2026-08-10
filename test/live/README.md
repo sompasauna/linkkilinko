@@ -11,8 +11,8 @@ IDs or credentials.
 4. Verify an established member can post ordinary media and explanatory links.
 5. Add a fresh test account and verify links, photos, videos, documents, and
    captions are removed with the quarantine notice.
-6. Post `share.google.com` and `amp.google.com` examples; verify direct URLs,
-   attribution, and forum-topic placement.
+6. Post `share.google`, legacy `goo.gl`, Google AMP-cache, and publisher AMP
+   examples; verify direct URLs, attribution, and forum-topic placement.
 7. Repeat each unchanged violation; verify silent deletion and no second bot
    response.
 8. Restart the process and repeat a suppressed repost and a pending outbox case.

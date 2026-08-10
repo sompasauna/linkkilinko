@@ -11,6 +11,14 @@ import (
 	"strings"
 )
 
+const (
+	ampRule         = "amp"
+	googleShareHost = "share.google"
+	legacyShortHost = "goo.gl"
+	httpScheme      = "http"
+	httpsScheme     = "https"
+)
+
 // ErrNoResolution indicates that a matching resolver could not find a safe
 // public destination.
 var ErrNoResolution = errors.New("no safe URL resolution")
@@ -52,6 +60,20 @@ type Resolution struct {
 // Registry dispatches URLs to registered resolvers in order.
 type Registry struct {
 	resolvers []Resolver
+}
+
+// MatchName returns the stable name of the first resolver matching rawURL.
+func (r Registry) MatchName(rawURL string) (string, bool) {
+	parsed, err := parseHTTPURL(rawURL)
+	if err != nil {
+		return "", false
+	}
+	for _, resolver := range r.resolvers {
+		if resolver.Match(parsed) {
+			return resolver.Name(), true
+		}
+	}
+	return "", false
 }
 
 // NewRegistry validates and returns a resolver registry.
@@ -104,71 +126,44 @@ func (r Registry) Resolve(ctx context.Context, rawURL string) (Resolution, bool,
 
 // Match reports whether any registered resolver owns rawURL.
 func (r Registry) Match(rawURL string) bool {
-	parsed, err := parseHTTPURL(rawURL)
-	if err != nil {
-		return false
-	}
-	for _, resolver := range r.resolvers {
-		if resolver.Match(parsed) {
-			return true
-		}
-	}
-	return false
+	_, matched := r.MatchName(rawURL)
+	return matched
 }
 
-type googleResolver struct {
-	fetcher   Fetcher
-	host      string
-	canonical bool
-}
+// GoogleShareResolver resolves Google share and legacy short links.
+type GoogleShareResolver struct{ fetcher Fetcher }
 
-func newGoogleResolver(fetcher Fetcher, host string, canonical bool) (googleResolver, error) {
+// AMPResolver resolves Google cache and publisher-hosted AMP URLs.
+type AMPResolver struct{ fetcher Fetcher }
+
+// NewGoogleResolvers constructs the Google share and AMP resolvers.
+func NewGoogleResolvers(fetcher Fetcher) (GoogleShareResolver, AMPResolver, error) {
 	if fetcher == nil {
-		return googleResolver{}, errors.New("link: nil Google fetcher")
+		return GoogleShareResolver{}, AMPResolver{}, errors.New("link: nil Google fetcher")
 	}
-	return googleResolver{fetcher: fetcher, host: host, canonical: canonical}, nil
-}
-
-// GoogleShareResolver resolves share.google.com wrappers.
-type GoogleShareResolver struct{ googleResolver }
-
-// GoogleAMPResolver resolves amp.google.com wrappers.
-type GoogleAMPResolver struct{ googleResolver }
-
-// NewGoogleResolvers constructs the two Google wrapper resolvers.
-func NewGoogleResolvers(fetcher Fetcher) (GoogleShareResolver, GoogleAMPResolver, error) {
-	share, err := newGoogleResolver(fetcher, "share.google.com", false)
-	if err != nil {
-		return GoogleShareResolver{}, GoogleAMPResolver{}, err
-	}
-	amp, err := newGoogleResolver(fetcher, "amp.google.com", true)
-	if err != nil {
-		return GoogleShareResolver{}, GoogleAMPResolver{}, err
-	}
-	return GoogleShareResolver{share}, GoogleAMPResolver{amp}, nil
+	return GoogleShareResolver{fetcher: fetcher}, AMPResolver{fetcher: fetcher}, nil
 }
 
 // Name returns the stable resolver name.
-func (r googleResolver) Name() string {
-	if r.canonical {
-		return "google-amp"
-	}
-	return "google-share"
-}
+func (GoogleShareResolver) Name() string { return "google-share" }
 
-func (r googleResolver) Hosts() []string { return []string{r.host} }
+// Name returns the stable resolver name.
+func (AMPResolver) Name() string { return ampRule }
 
-// Match reports whether u is hosted by one of the supported Google wrappers.
-func (r googleResolver) Match(u *url.URL) bool {
+// Hosts returns the exact hosts owned by the share resolver.
+func (GoogleShareResolver) Hosts() []string { return []string{googleShareHost, legacyShortHost} }
+
+// Match reports whether u is a Google share or legacy short link.
+func (GoogleShareResolver) Match(u *url.URL) bool {
 	if u == nil {
 		return false
 	}
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	return host == r.host
+	return host == googleShareHost || host == legacyShortHost
 }
 
-// Resolve follows a bounded safe redirect and AMP canonical link.
-func (r googleResolver) Resolve(ctx context.Context, original *url.URL) (Resolution, error) {
+// Resolve follows the bounded redirect chain to the shared destination.
+func (r GoogleShareResolver) Resolve(ctx context.Context, original *url.URL) (Resolution, error) {
 	result, err := r.fetcher.Fetch(ctx, original.String())
 	if err != nil {
 		return Resolution{}, err
@@ -177,25 +172,59 @@ func (r googleResolver) Resolve(ctx context.Context, original *url.URL) (Resolut
 		return Resolution{}, ErrNoResolution
 	}
 	destination := result.URL
-	if r.canonical && destination.Hostname() == r.host {
-		if canonical := canonicalURLFor(result.Body, result.URL); canonical != nil && !isGoogleWrapper(canonical) {
-			destination = canonical
-		}
-	}
-	if isGoogleWrapper(destination) || !isPublicHTTPURL(destination) {
+	if isGoogleShare(destination) || !isPublicHTTPURL(destination) {
 		return Resolution{}, ErrNoResolution
 	}
 	return Resolution{Original: cloneURL(original), Destination: cloneURL(destination), Resolver: r.Name()}, nil
 }
 
-var canonicalPattern = regexp.MustCompile(`(?is)<link\b[^>]*\brel\s*=\s*["'][^"']*\bcanonical\b[^"']*["'][^>]*\bhref\s*=\s*["']([^"']+)["']`)
+// Match reports whether u has a recognized AMP cache or publisher URL shape.
+func (AMPResolver) Match(u *url.URL) bool { return isAMPURL(u) }
+
+// Resolve unwraps deterministic cache URLs, then prefers a publisher canonical
+// URL from the safely fetched page.
+func (r AMPResolver) Resolve(ctx context.Context, original *url.URL) (Resolution, error) {
+	if destination := unwrapAMPCache(original); destination != nil && isPublicHTTPURL(destination) {
+		return Resolution{Original: cloneURL(original), Destination: destination, Resolver: r.Name()}, nil
+	}
+	result, err := r.fetcher.Fetch(ctx, original.String())
+	if err != nil {
+		return Resolution{}, err
+	}
+	if result.URL == nil {
+		return Resolution{}, ErrNoResolution
+	}
+	destination := result.URL
+	if canonical := canonicalURLFor(result.Body, result.URL); canonical != nil && !isAMPURL(canonical) {
+		destination = canonical
+	}
+	if isAMPURL(destination) || !isPublicHTTPURL(destination) {
+		return Resolution{}, ErrNoResolution
+	}
+	return Resolution{Original: cloneURL(original), Destination: cloneURL(destination), Resolver: r.Name()}, nil
+}
+
+var (
+	linkPattern      = regexp.MustCompile(`(?is)<link\b[^>]*>`)
+	canonicalPattern = regexp.MustCompile(`(?is)\brel\s*=\s*["'][^"']*\bcanonical\b[^"']*["']`)
+	hrefPattern      = regexp.MustCompile(`(?is)\bhref\s*=\s*["']([^"']+)["']`)
+)
 
 func canonicalURLFor(body []byte, base *url.URL) *url.URL {
-	match := canonicalPattern.FindSubmatch(body)
-	if len(match) != 2 {
+	var match []byte
+	for _, tag := range linkPattern.FindAll(body, -1) {
+		if canonicalPattern.Match(tag) {
+			href := hrefPattern.FindSubmatch(tag)
+			if len(href) == 2 {
+				match = href[1]
+				break
+			}
+		}
+	}
+	if len(match) == 0 {
 		return nil
 	}
-	raw := strings.TrimSpace(string(match[1]))
+	raw := strings.TrimSpace(string(match))
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil
@@ -214,7 +243,7 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse URL: %w", err)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+	if (u.Scheme != httpScheme && u.Scheme != httpsScheme) || u.Hostname() == "" || u.User != nil {
 		return nil, fmt.Errorf("unsupported URL %q", raw)
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
@@ -223,7 +252,7 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 }
 
 func isPublicHTTPURL(u *url.URL) bool {
-	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+	if u == nil || (u.Scheme != httpScheme && u.Scheme != httpsScheme) || u.Hostname() == "" || u.User != nil {
 		return false
 	}
 	if ip := net.ParseIP(u.Hostname()); ip != nil {
@@ -257,12 +286,81 @@ func mustDestinationNetworks(values ...string) []*net.IPNet {
 	return result
 }
 
-func isGoogleWrapper(u *url.URL) bool {
+func isGoogleShare(u *url.URL) bool {
 	if u == nil {
 		return false
 	}
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	return host == "share.google.com" || host == "amp.google.com"
+	return host == googleShareHost || host == legacyShortHost
+}
+
+func isAMPURL(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	path := strings.ToLower(u.EscapedPath())
+	query := strings.ToLower(u.RawQuery)
+	if strings.HasSuffix(host, ".cdn.ampproject.org") || strings.HasSuffix(host, ".ampproject.net") {
+		return true
+	}
+	switch {
+	case (host == "google.com" || host == "www.google.com") && strings.HasPrefix(path, "/amp/"):
+		return true
+	case strings.HasPrefix(host, "www.google."):
+		return false
+	case strings.HasPrefix(host, "amp."):
+		return true
+	}
+	return path == "/amp" || strings.HasPrefix(path, "/amp/") || strings.HasSuffix(path, "/amp") ||
+		strings.Contains(path, "/amp/") || strings.HasSuffix(path, ".amp") || hasAMPQuery(query)
+}
+
+func hasAMPQuery(query string) bool {
+	for pair := range strings.SplitSeq(query, "&") {
+		name, value, _ := strings.Cut(pair, "=")
+		if name == "amp" || strings.HasPrefix(name, "amp_") || strings.HasSuffix(name, "_amp") ||
+			(name == "output" && value == "amp") {
+			return true
+		}
+	}
+	return false
+}
+
+func unwrapAMPCache(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	path := u.EscapedPath()
+	var rest string
+	switch {
+	case (host == "google.com" || host == "www.google.com") && strings.HasPrefix(path, "/amp/"):
+		rest = strings.TrimPrefix(path, "/amp/")
+	case strings.HasSuffix(host, ".cdn.ampproject.org"):
+		if after, ok := strings.CutPrefix(path, "/c/"); ok {
+			rest = after
+		} else if after, ok := strings.CutPrefix(path, "/v/"); ok {
+			rest = after
+		} else {
+			return nil
+		}
+	default:
+		return nil
+	}
+	scheme := httpScheme
+	if strings.HasPrefix(rest, "s/") {
+		scheme = httpsScheme
+		rest = strings.TrimPrefix(rest, "s/")
+	}
+	if rest == "" || strings.HasPrefix(rest, "/") {
+		return nil
+	}
+	destination, err := parseHTTPURL(scheme + "://" + rest)
+	if err != nil {
+		return nil
+	}
+	return destination
 }
 
 func cloneURL(u *url.URL) *url.URL {

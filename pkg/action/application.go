@@ -20,7 +20,7 @@ import (
 	"github.com/sompasauna/linkkilinko/pkg/core/preview"
 )
 
-const behaviorVersion = "v0.2"
+const behaviorVersion = "v0.3"
 
 const (
 	operationText      = "text"
@@ -97,7 +97,7 @@ type MetadataPort interface {
 
 // LinkPort resolves tracked links.
 type LinkPort interface {
-	Match(rawURL string) bool
+	MatchName(rawURL string) (string, bool)
 	Resolve(ctx context.Context, rawURL string) (link.Resolution, bool, error)
 }
 
@@ -143,14 +143,11 @@ func (a *Application) moderateLinks(ctx context.Context, input moderation.Input)
 	destinations := make(map[int]string)
 	matchedWrapper := false
 	for index, candidate := range urls {
-		if !a.links.Match(candidate.Target) {
+		resolverName, matched := a.links.MatchName(candidate.Target)
+		if !matched {
 			continue
 		}
 		matchedWrapper = true
-		resolverName := "google-share"
-		if strings.Contains(strings.ToLower(candidate.Target), "amp.google.com") {
-			resolverName = "google-amp"
-		}
 		fingerprint := moderation.Fingerprint(input, resolverName)
 		if canonical, found, err := a.state.FindCanonical(ctx, input.ChatID, input.ThreadID, input.SenderID, resolverName, behaviorVersion, fingerprint); err != nil {
 			return err
@@ -204,8 +201,11 @@ func (a *Application) handleResolvedWrappers(ctx context.Context, input moderati
 		}
 	}
 	rule := "google-share"
-	if len(urls) > 0 && strings.Contains(strings.ToLower(urls[0].Target), "amp.google.com") {
-		rule = "google-amp"
+	for index := range destinations {
+		if resolutionRule, matched := a.links.MatchName(urls[index].Target); matched {
+			rule = resolutionRule
+			break
+		}
 	}
 	plan := moderation.Plan{
 		Action:      moderation.ActionReplace,

@@ -105,7 +105,7 @@ func TestCanonicalCreationIsIdempotent(t *testing.T) {
 	}
 }
 
-// Splitting google-wrapper into google-share and google-amp renames a value
+// Splitting google-wrapper into stable resolver rules renames a value
 // that is persisted in canonical_actions.rule and is part of the uniqueness
 // key driving repost suppression. The rename must ship with a behavior_version
 // bump so v0.1 rows are cleanly superseded rather than half-matching. This

@@ -30,8 +30,9 @@ moderation loop.
 
 ## Goals
 
-1. Remove `share.google.com` and `amp.google.com` tracking or wrapper URLs from
-   messages and publish direct destination URLs instead.
+1. Remove `share.google` and legacy `goo.gl` redirects, Google AMP-cache URLs,
+   and recognizable publisher AMP URLs from messages and publish direct
+   destination URLs instead.
 2. Require a link-only post to be understandable from metadata or from text
    written by the sender.
 3. Prevent newly joined members from posting links or media for exactly 48 hours.
@@ -276,8 +277,9 @@ durable membership storage are required for full Daysandbox parity.
 
 ### 4. Tracked-Link Rewriting
 
-If any extracted URL has an exact normalized host of `share.google.com` or
-`amp.google.com`, or a registered rule explicitly matches it:
+If any extracted URL has an exact normalized host of `share.google` or `goo.gl`,
+matches a Google or AMP Project cache URL shape, or is recognized as a
+publisher-hosted AMP URL by a registered rule:
 
 1. Resolve every matched URL before deleting anything.
 2. Accept only a valid public HTTP or HTTPS destination outside the matched
@@ -380,10 +382,14 @@ rules. They never use arbitrary substring matching.
 
 The initial registry contains:
 
-1. `google-share`: exact host `share.google.com`; follows bounded redirects to a
-   non-wrapper destination.
-2. `google-amp`: exact host `amp.google.com`; follows redirects and accepts a
-   safely fetched HTML canonical link when it points outside the wrapper host.
+1. `google-share`: exact hosts `share.google` and legacy `goo.gl`; follows
+   bounded redirects to a non-wrapper destination.
+2. `amp`: recognizes Google `/amp/` cache URLs, `*.cdn.ampproject.org` cache
+   URLs, `amp.` publisher subdomains, and explicit AMP path or query markers.
+   It unwraps deterministic cache paths without a request; otherwise it safely
+   fetches the page and accepts a non-AMP HTML canonical URL. Inconclusive
+   heuristic rewrites are not accepted merely because an AMP-looking path can
+   be stripped.
 
 Safe generic redirects and metadata retrieval are provided by the hardened
 fetcher, not by a catch-all resolver. A resolver that matches every URL would
@@ -543,8 +549,9 @@ terminal outbox completion unless needed for the active canonical payload.
 
 1. Google wrapper redirects, redirect loops, unsafe redirects, relative
    locations, canonical tags, and unresolved wrappers.
-2. Exact-host matching proves that `share.google.com.attacker.example` does not
-   match.
+2. Exact-host matching proves that `share.google.attacker.example` and
+   `goo.gl.attacker.example` do not match; AMP shape tests cover both recognized
+   cache/publisher forms and ordinary words containing `amp`.
 3. Open Graph, Twitter card, HTML fallback, missing metadata, malformed HTML,
    unsupported content, oversized bodies, timeouts, and temporary failures.
 4. Registry ordering, ambiguous registration rejection, and independent future
@@ -572,8 +579,8 @@ A private Telegram test group demonstrates:
 2. An unchanged repost is deleted silently and the first notice remains the only
    bot response.
 3. An established user can post ordinary media and explanatory link messages.
-4. `share.google.com` and `amp.google.com` examples are replaced with verified
-   direct URLs and correct attribution.
+4. `share.google`, legacy `goo.gl`, Google AMP-cache, and publisher AMP examples
+   are replaced with verified direct URLs and correct attribution.
 5. Reposting either unchanged wrapper message produces no second replacement;
    changing the accompanying text produces a new canonical action.
 6. A link-only post with an explicitly disabled preview is either enriched from

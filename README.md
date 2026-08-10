@@ -3,8 +3,9 @@
 `linkkilinko` is a Go moderation bot for Telegram groups and supergroups. It is
 designed to:
 
-1. Replace `share.google.com` and `amp.google.com` wrapper links with direct
-   destination URLs while attributing the original sender.
+1. Replace `share.google` and legacy `goo.gl` redirect links, plus recognized
+   Google-cache and publisher AMP URLs, with direct destination URLs while
+   attributing the original sender.
 2. Require link-only posts to have useful preview metadata or explanatory text.
 3. Prevent members who joined less than 48 hours ago from posting links or media.
 
