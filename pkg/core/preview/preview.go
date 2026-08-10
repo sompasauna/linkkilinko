@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -36,6 +37,10 @@ type Provider interface {
 	Match(document Document) bool
 	Extract(document Document) Metadata
 }
+
+// InconclusiveProvider marks a provider result that must not be treated as a
+// definitive absence of metadata.
+type InconclusiveProvider interface{ Inconclusive() bool }
 
 // Registry dispatches documents to metadata providers.
 type Registry struct {
@@ -70,6 +75,67 @@ func (r Registry) Inspect(document Document) (Metadata, string) {
 	}
 	return Metadata{}, ""
 }
+
+// IsInconclusive reports whether the selected provider could not safely decide.
+// For InconclusiveProvider, this calls Extract to determine the actual state.
+func (r Registry) IsInconclusive(document Document) bool {
+	for _, provider := range r.providers {
+		if provider.Match(document) {
+			if inconclusive, ok := provider.(InconclusiveProvider); ok {
+				if ip, ok := provider.(interface {
+					Extract(document Document) Metadata
+				}); ok {
+					metadata := ip.Extract(document)
+					return inconclusive.Inconclusive() || !metadata.Useful()
+				}
+				return inconclusive.Inconclusive()
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// FacebookProvider extracts metadata from Facebook-family documents. The
+// caller supplies the document fetched through the mobile-host policy.
+type FacebookProvider struct {
+	inconclusive bool
+}
+
+var facebookHosts = []string{
+	"facebook.com",
+	"www.facebook.com",
+	"m.facebook.com",
+	"mbasic.facebook.com",
+	"fb.watch",
+	"fb.me",
+}
+
+// Name returns the stable provider name.
+func (p *FacebookProvider) Name() string { return "facebook" }
+
+// Match reports whether document is hosted by the Facebook host family, using
+// exact-host comparison so lookalikes such as facebook.com.example never match.
+func (p *FacebookProvider) Match(document Document) bool {
+	if document.URL == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(document.URL.Hostname(), "."))
+	return slices.Contains(facebookHosts, host)
+}
+
+// Extract reads the Open Graph and HTML fallback fields Facebook serves to
+// anonymous crawlers on its mobile hosts. It reports whether extraction
+// succeeded by updating the inconclusive state.
+func (p *FacebookProvider) Extract(document Document) Metadata {
+	m := GenericHTMLProvider{}.Extract(document)
+	p.inconclusive = !m.Useful()
+	return m
+}
+
+// Inconclusive reports whether the last Extract call produced no useful
+// metadata, so a failed probe leaves the message alone instead of deleting it.
+func (p *FacebookProvider) Inconclusive() bool { return p.inconclusive }
 
 // GenericHTMLProvider extracts Open Graph, Twitter, and HTML fallback fields.
 type GenericHTMLProvider struct{}

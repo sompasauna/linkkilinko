@@ -52,15 +52,17 @@ type DatabaseConfig struct {
 type ModerationConfig struct {
 	NewcomerSandbox Duration `yaml:"newcomer_sandbox"`
 	NoticeLanguage  string   `yaml:"notice_language"`
+	NoticeCatalog   string   `yaml:"notice_catalog"`
 }
 
 // MetadataConfig configures safe HTTP retrieval.
 type MetadataConfig struct {
-	RequestTimeout Duration `yaml:"request_timeout"`
-	TotalTimeout   Duration `yaml:"total_timeout"`
-	MaxRedirects   int      `yaml:"max_redirects"`
-	MaxHTMLBytes   int64    `yaml:"max_html_bytes"`
-	UserAgent      string   `yaml:"user_agent"`
+	RequestTimeout    Duration `yaml:"request_timeout"`
+	TotalTimeout      Duration `yaml:"total_timeout"`
+	MaxRedirects      int      `yaml:"max_redirects"`
+	MaxHTMLBytes      int64    `yaml:"max_html_bytes"`
+	UserAgent         string   `yaml:"user_agent"`
+	FacebookUserAgent string   `yaml:"facebook_user_agent"`
 }
 
 // Defaults returns the initial operational defaults.
@@ -68,11 +70,12 @@ func Defaults() Config {
 	return Config{
 		Moderation: ModerationConfig{NewcomerSandbox: Duration(48 * time.Hour), NoticeLanguage: "fi"},
 		Metadata: MetadataConfig{
-			RequestTimeout: Duration(5 * time.Second),
-			TotalTimeout:   Duration(10 * time.Second),
-			MaxRedirects:   5,
-			MaxHTMLBytes:   2 << 20,
-			UserAgent:      "linkkilinko/0.1",
+			RequestTimeout:    Duration(5 * time.Second),
+			TotalTimeout:      Duration(10 * time.Second),
+			MaxRedirects:      5,
+			MaxHTMLBytes:      2 << 20,
+			UserAgent:         "linkkilinko/0.1",
+			FacebookUserAgent: "linkkilinko-facebook/0.1",
 		},
 	}
 }
@@ -118,6 +121,9 @@ func (c Config) Validate() error {
 	if time.Duration(c.Metadata.RequestTimeout) <= 0 || time.Duration(c.Metadata.TotalTimeout) <= 0 {
 		return errors.New("config: metadata timeouts must be positive")
 	}
+	if time.Duration(c.Metadata.RequestTimeout) >= time.Duration(c.Metadata.TotalTimeout) {
+		return errors.New("config: request_timeout must be less than total_timeout")
+	}
 	if time.Duration(c.Metadata.RequestTimeout) > time.Minute || time.Duration(c.Metadata.TotalTimeout) > 2*time.Minute {
 		return errors.New("config: metadata timeout exceeds safety ceiling")
 	}
@@ -129,6 +135,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Metadata.UserAgent) == "" {
 		return errors.New("config: user_agent is empty")
+	}
+	if strings.TrimSpace(c.Metadata.FacebookUserAgent) == "" {
+		return errors.New("config: facebook_user_agent is empty")
 	}
 	return nil
 }

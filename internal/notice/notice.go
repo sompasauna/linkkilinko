@@ -7,13 +7,14 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/sompasauna/linkkilinko/pkg/core/moderation"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed catalog/*.yaml
@@ -45,6 +46,15 @@ func Languages() ([]string, error) {
 // exactly the notice keys a moderation plan can emit. An unknown language or
 // an incomplete catalog is a startup error, never a runtime surprise.
 func Load(language string) (Catalog, error) {
+	return load(language, "")
+}
+
+// LoadWithOverride loads an embedded catalog and overlays operator-provided text.
+func LoadWithOverride(language, overridePath string) (Catalog, error) {
+	return load(language, overridePath)
+}
+
+func load(language, overridePath string) (Catalog, error) {
 	name := strings.ToLower(strings.TrimSpace(language))
 	if name == "" {
 		return Catalog{}, errors.New("notice: language is empty")
@@ -60,6 +70,22 @@ func Load(language string) (Catalog, error) {
 	var messages map[string]string
 	if err := yaml.Unmarshal(data, &messages); err != nil {
 		return Catalog{}, fmt.Errorf("notice: parse catalog %q: %w", name, err)
+	}
+	if strings.TrimSpace(overridePath) != "" {
+		overrideData, readErr := os.ReadFile(overridePath)
+		if readErr != nil {
+			return Catalog{}, fmt.Errorf("notice: read override %q: %w", overridePath, readErr)
+		}
+		var overrides map[string]string
+		if err := yaml.Unmarshal(overrideData, &overrides); err != nil {
+			return Catalog{}, fmt.Errorf("notice: parse override %q: %w", overridePath, err)
+		}
+		for key, value := range overrides {
+			if strings.TrimSpace(value) == "" {
+				return Catalog{}, fmt.Errorf("notice: override %q has empty key %q", overridePath, key)
+			}
+			messages[key] = value
+		}
 	}
 	if err := validate(name, messages); err != nil {
 		return Catalog{}, err
@@ -103,6 +129,18 @@ func validate(language string, messages map[string]string) error {
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
 		return fmt.Errorf("notice: catalog %q defines unknown keys: %s", language, strings.Join(unknown, ", "))
+	}
+	allowed := map[string]map[string]struct{}{
+		moderation.NoticeGoogleWrapper:   {"sender": {}, "content": {}},
+		moderation.NoticePreviewEnriched: {"sender": {}, "url": {}, "metadata": {}},
+	}
+	placeholderPattern := regexp.MustCompile(`\{([a-z]+)\}`)
+	for key, message := range messages {
+		for _, match := range placeholderPattern.FindAllStringSubmatch(message, -1) {
+			if _, ok := allowed[key][match[1]]; !ok {
+				return fmt.Errorf("notice: catalog %q key %q uses unsupported placeholder {%s}", language, key, match[1])
+			}
+		}
 	}
 	return nil
 }

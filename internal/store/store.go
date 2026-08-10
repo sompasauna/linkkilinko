@@ -50,6 +50,7 @@ type OutboxEntry struct {
 	Attempts          int
 	NextAttemptAt     time.Time
 	ResponseMessageID int
+	LeaseUntil        time.Time
 }
 
 // Store is a concurrency-safe database/sql handle for linkkilinko state.
@@ -122,7 +123,7 @@ func (s *Store) ClaimUpdate(ctx context.Context, chatID int64, messageID int, ed
 		VALUES (?, ?, ?, 'processing', ?)
 		ON CONFLICT(chat_id, message_id, edit_date) DO UPDATE SET
 			state = 'processing', updated_at = excluded.updated_at
-		WHERE processed_updates.state <> 'complete'
+		WHERE processed_updates.state NOT IN ('complete', 'failed')
 		  AND processed_updates.updated_at < excluded.updated_at - 300`, chatID, messageID, editDate, now)
 	if err != nil {
 		return false, fmt.Errorf("store: claim update: %w", err)
@@ -141,6 +142,21 @@ func (s *Store) CompleteUpdate(ctx context.Context, chatID int64, messageID int,
 		WHERE chat_id = ? AND message_id = ? AND edit_date = ?`, time.Now().Unix(), chatID, messageID, editDate)
 	if err != nil {
 		return fmt.Errorf("store: complete update: %w", err)
+	}
+	return nil
+}
+
+// FailUpdate marks a claimed update terminal and preserves an operator-facing error.
+func (s *Store) FailUpdate(ctx context.Context, chatID int64, messageID int, editDate int64, operationErr error) error {
+	message := "update failed"
+	if operationErr != nil {
+		message = operationErr.Error()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE processed_updates SET state = 'failed', decision = ?, updated_at = ?
+		WHERE chat_id = ? AND message_id = ? AND edit_date = ?`, message, time.Now().Unix(), chatID, messageID, editDate)
+	if err != nil {
+		return fmt.Errorf("store: fail update: %w", err)
 	}
 	return nil
 }
@@ -342,27 +358,52 @@ func (s *Store) MarkSendPending(ctx context.Context, actionID int64) error {
 
 // PendingOutbox returns due actions that need Telegram side effects.
 func (s *Store) PendingOutbox(ctx context.Context, now time.Time) ([]OutboxEntry, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, canonical_action_id, chat_id, thread_id, source_message_id, payload, state, attempts, next_attempt_at, response_message_id
-		FROM moderation_outbox WHERE state NOT IN ('complete', 'dead') AND next_attempt_at <= ? ORDER BY id`, now.Unix())
+	transaction, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("store: list outbox: %w", err)
+		return nil, fmt.Errorf("store: begin claim outbox: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	leaseUntil := now.Add(time.Minute).Unix()
+	if _, err := transaction.ExecContext(ctx, `
+		UPDATE moderation_outbox SET lease_until = ?
+		WHERE state NOT IN ('complete', 'dead') AND next_attempt_at <= ? AND lease_until <= ?`, leaseUntil, now.Unix(), now.Unix()); err != nil {
+		return nil, fmt.Errorf("store: claim outbox: %w", err)
+	}
+	rows, err := transaction.QueryContext(ctx, `
+		SELECT id, canonical_action_id, chat_id, thread_id, source_message_id, payload, state, attempts, next_attempt_at, response_message_id, lease_until
+		FROM moderation_outbox WHERE lease_until = ? AND state NOT IN ('complete', 'dead') ORDER BY id`, leaseUntil)
+	if err != nil {
+		return nil, fmt.Errorf("store: list claimed outbox: %w", err)
 	}
 	defer rows.Close()
 	var entries []OutboxEntry
 	for rows.Next() {
 		var entry OutboxEntry
 		var next int64
-		if err := rows.Scan(&entry.ID, &entry.CanonicalActionID, &entry.ChatID, &entry.ThreadID, &entry.SourceMessageID, &entry.Payload, &entry.State, &entry.Attempts, &next, &entry.ResponseMessageID); err != nil {
+		var lease int64
+		if err := rows.Scan(&entry.ID, &entry.CanonicalActionID, &entry.ChatID, &entry.ThreadID, &entry.SourceMessageID, &entry.Payload, &entry.State, &entry.Attempts, &next, &entry.ResponseMessageID, &lease); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
 		entry.NextAttemptAt = time.Unix(next, 0).UTC()
+		entry.LeaseUntil = time.Unix(lease, 0).UTC()
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list outbox rows: %w", err)
 	}
+	if err := transaction.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit outbox claim: %w", err)
+	}
 	return entries, nil
+}
+
+// ReleaseOutboxLease makes an unfinished action eligible for another worker.
+func (s *Store) ReleaseOutboxLease(ctx context.Context, actionID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE moderation_outbox SET lease_until = 0 WHERE canonical_action_id = ?`, actionID)
+	if err != nil {
+		return fmt.Errorf("store: release outbox lease: %w", err)
+	}
+	return nil
 }
 
 // MarkOutboxComplete records a successful response and closes the canonical action.
@@ -372,7 +413,7 @@ func (s *Store) MarkOutboxComplete(ctx context.Context, actionID int64, response
 		return fmt.Errorf("store: begin complete outbox: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
-	if _, err := transaction.ExecContext(ctx, `UPDATE moderation_outbox SET state = 'complete', response_message_id = ?, last_error = '' WHERE canonical_action_id = ?`, responseMessageID, actionID); err != nil {
+	if _, err := transaction.ExecContext(ctx, `UPDATE moderation_outbox SET state = 'complete', response_message_id = ?, last_error = '', lease_until = 0 WHERE canonical_action_id = ?`, responseMessageID, actionID); err != nil {
 		return fmt.Errorf("store: complete outbox: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `UPDATE canonical_actions SET response_message_id = ?, response_state = 'sent' WHERE id = ?`, responseMessageID, actionID); err != nil {
@@ -429,7 +470,7 @@ func (s *Store) MarkOutboxDead(ctx context.Context, actionID int64, operationErr
 	}
 	defer func() { _ = transaction.Rollback() }()
 	if _, err := transaction.ExecContext(ctx, `
-		UPDATE moderation_outbox SET state = 'dead', attempts = attempts + 1, last_error = ?, next_attempt_at = ?
+		UPDATE moderation_outbox SET state = 'dead', attempts = attempts + 1, last_error = ?, next_attempt_at = ?, lease_until = 0
 		WHERE canonical_action_id = ?`, message, time.Now().Unix(), actionID); err != nil {
 		return fmt.Errorf("store: dead-letter outbox: %w", err)
 	}
@@ -481,6 +522,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			edit_date INTEGER NOT NULL,
 			state TEXT NOT NULL,
 			updated_at INTEGER NOT NULL,
+			decision TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY(chat_id, message_id, edit_date)
 		)`,
 		`CREATE TABLE IF NOT EXISTS canonical_actions (
@@ -518,6 +560,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			next_attempt_at INTEGER NOT NULL,
 			last_error TEXT NOT NULL DEFAULT '',
 			response_message_id INTEGER NOT NULL DEFAULT 0,
+			lease_until INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			FOREIGN KEY(canonical_action_id) REFERENCES canonical_actions(id)
 		)`,
@@ -530,6 +573,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, statement := range statements {
 		if _, err := transaction.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("store: migrate schema: %w", err)
+		}
+	}
+	// Add columns introduced after the initial schema without requiring a
+	// destructive migration for an existing installation.
+	for _, statement := range []string{
+		`ALTER TABLE processed_updates ADD COLUMN decision TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE moderation_outbox ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := transaction.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("store: migrate added columns: %w", err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {

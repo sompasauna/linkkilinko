@@ -36,6 +36,12 @@ type Resolver interface {
 	Resolve(ctx context.Context, candidate *url.URL) (Resolution, error)
 }
 
+// HostMatcher exposes exact host ownership for startup ambiguity checks.
+type HostMatcher interface {
+	Resolver
+	Hosts() []string
+}
+
 // Resolution describes a successfully transformed URL.
 type Resolution struct {
 	Original    *url.URL
@@ -51,6 +57,7 @@ type Registry struct {
 // NewRegistry validates and returns a resolver registry.
 func NewRegistry(resolvers ...Resolver) (Registry, error) {
 	seen := make(map[string]struct{}, len(resolvers))
+	hosts := make(map[string]string)
 	for _, resolver := range resolvers {
 		if resolver == nil {
 			return Registry{}, errors.New("link: nil resolver")
@@ -63,6 +70,15 @@ func NewRegistry(resolvers ...Resolver) (Registry, error) {
 			return Registry{}, fmt.Errorf("link: duplicate resolver %q", name)
 		}
 		seen[name] = struct{}{}
+		if matcher, ok := resolver.(HostMatcher); ok {
+			for _, host := range matcher.Hosts() {
+				host = strings.ToLower(strings.TrimSuffix(host, "."))
+				if owner, exists := hosts[host]; exists && owner != name {
+					return Registry{}, fmt.Errorf("link: ambiguous host %q claimed by %q and %q", host, owner, name)
+				}
+				hosts[host] = name
+			}
+		}
 	}
 	return Registry{resolvers: append([]Resolver(nil), resolvers...)}, nil
 }
@@ -100,34 +116,65 @@ func (r Registry) Match(rawURL string) bool {
 	return false
 }
 
-// GoogleResolver resolves share.google.com and amp.google.com wrappers.
-type GoogleResolver struct {
-	fetcher Fetcher
+type googleResolver struct {
+	fetcher   Fetcher
+	host      string
+	canonical bool
 }
 
-// NewGoogleResolver constructs a resolver using fetcher for redirects and
-// canonical-link inspection.
-func NewGoogleResolver(fetcher Fetcher) (GoogleResolver, error) {
+func newGoogleResolver(fetcher Fetcher, host string, canonical bool) (googleResolver, error) {
 	if fetcher == nil {
-		return GoogleResolver{}, errors.New("link: nil Google fetcher")
+		return googleResolver{}, errors.New("link: nil Google fetcher")
 	}
-	return GoogleResolver{fetcher: fetcher}, nil
+	return googleResolver{fetcher: fetcher, host: host, canonical: canonical}, nil
+}
+
+// GoogleShareResolver resolves share.google.com wrappers.
+type GoogleShareResolver struct{ googleResolver }
+
+// GoogleAMPResolver resolves amp.google.com wrappers.
+type GoogleAMPResolver struct{ googleResolver }
+
+// NewGoogleResolvers constructs the two Google wrapper resolvers.
+func NewGoogleResolvers(fetcher Fetcher) (GoogleShareResolver, GoogleAMPResolver, error) {
+	share, err := newGoogleResolver(fetcher, "share.google.com", false)
+	if err != nil {
+		return GoogleShareResolver{}, GoogleAMPResolver{}, err
+	}
+	amp, err := newGoogleResolver(fetcher, "amp.google.com", true)
+	if err != nil {
+		return GoogleShareResolver{}, GoogleAMPResolver{}, err
+	}
+	return GoogleShareResolver{share}, GoogleAMPResolver{amp}, nil
+}
+
+// NewGoogleResolver is retained for source compatibility and returns the AMP resolver.
+func NewGoogleResolver(fetcher Fetcher) (GoogleAMPResolver, error) {
+	_, amp, err := NewGoogleResolvers(fetcher)
+	return amp, err
 }
 
 // Name returns the stable resolver name.
-func (r GoogleResolver) Name() string { return "google-wrapper" }
+func (r googleResolver) Name() string {
+	if r.canonical {
+		return "google-amp"
+	}
+	return "google-share"
+}
+
+func (r googleResolver) Hosts() []string { return []string{r.host} }
 
 // Match reports whether u is hosted by one of the supported Google wrappers.
-func (r GoogleResolver) Match(u *url.URL) bool {
+func (r googleResolver) Match(u *url.URL) bool {
 	if u == nil {
 		return false
 	}
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	return host == "share.google.com" || host == "amp.google.com"
+	return host == r.host
 }
 
 // Resolve follows a bounded safe redirect and AMP canonical link.
-func (r GoogleResolver) Resolve(ctx context.Context, original *url.URL) (Resolution, error) {
+func (r googleResolver) Resolve(ctx context.Context, original *url.URL) (Resolution, error) {
 	result, err := r.fetcher.Fetch(ctx, original.String())
 	if err != nil {
 		return Resolution{}, err
@@ -136,7 +183,7 @@ func (r GoogleResolver) Resolve(ctx context.Context, original *url.URL) (Resolut
 		return Resolution{}, ErrNoResolution
 	}
 	destination := result.URL
-	if isGoogleWrapper(destination) {
+	if r.canonical && destination.Hostname() == r.host {
 		if canonical := canonicalURLFor(result.Body, result.URL); canonical != nil && !isGoogleWrapper(canonical) {
 			destination = canonical
 		}

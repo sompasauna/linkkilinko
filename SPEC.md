@@ -153,7 +153,9 @@ database:
 
 moderation:
   newcomer_sandbox: 48h
-  notice_language: "fi"
+    notice_language: "fi"
+    # Optional YAML overlay; embedded catalog entries remain the defaults.
+    notice_catalog: ""
 
 metadata:
   request_timeout: 5s
@@ -378,8 +380,10 @@ The initial registry contains:
    non-wrapper destination.
 2. `google-amp`: exact host `amp.google.com`; follows redirects and accepts a
    safely fetched HTML canonical link when it points outside the wrapper host.
-3. `generic-http`: no rewrite by itself; supplies safe redirect and metadata
-   retrieval for preview inspection.
+
+Safe generic redirects and metadata retrieval are provided by the hardened
+fetcher, not by a catch-all resolver. A resolver that matches every URL would
+make wrapper detection ambiguous.
 
 ### Metadata Providers
 

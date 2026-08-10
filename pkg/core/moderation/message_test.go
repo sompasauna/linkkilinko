@@ -7,11 +7,13 @@ import (
 	"github.com/sompasauna/linkkilinko/pkg/core/moderation"
 )
 
+const entityURL = "url"
+
 func TestExtractURLsHandlesUTF16Offsets(t *testing.T) {
 	t.Parallel()
 	in := moderation.Input{
 		Text:     "🙂 https://example.test/path",
-		Entities: []moderation.Entity{{Type: "url", Offset: 3, Length: 25}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 3, Length: 25}},
 	}
 	urls := moderation.ExtractURLs(in)
 	if len(urls) != 1 || urls[0].Raw != "https://example.test/path" {
@@ -23,7 +25,7 @@ func TestIsLinkOnlyIgnoresURLAndPunctuation(t *testing.T) {
 	t.Parallel()
 	in := moderation.Input{
 		Text:     "(https://example.test)",
-		Entities: []moderation.Entity{{Type: "url", Offset: 1, Length: 20}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 1, Length: 20}},
 	}
 	if !moderation.IsLinkOnly(in) {
 		t.Fatal("expected link-only message")
@@ -35,7 +37,7 @@ func TestNewcomerPlanBoundary(t *testing.T) {
 	joined := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
 	in := moderation.Input{
 		Text:     "https://example.test",
-		Entities: []moderation.Entity{{Type: "url", Offset: 0, Length: 20}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 0, Length: 20}},
 	}
 	if _, ok := moderation.NewcomerPlan(in, joined, joined.Add(48*time.Hour), 48*time.Hour); ok {
 		t.Fatal("expected the exact 48-hour boundary to be allowed")
@@ -49,11 +51,11 @@ func TestFingerprintNormalizesEquivalentURLs(t *testing.T) {
 	t.Parallel()
 	first := moderation.Input{
 		Text:     "https://EXAMPLE.test:443/path",
-		Entities: []moderation.Entity{{Type: "url", Offset: 0, Length: 29}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 0, Length: 29}},
 	}
 	second := moderation.Input{
 		Text:     " https://example.test/path ",
-		Entities: []moderation.Entity{{Type: "url", Offset: 1, Length: 25}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 1, Length: 25}},
 	}
 	if moderation.Fingerprint(first, "rule") != moderation.Fingerprint(second, "rule") {
 		t.Fatal("expected equivalent URLs to share a fingerprint")
@@ -65,7 +67,7 @@ func TestReplaceURLSpansUsesEntityOffsets(t *testing.T) {
 	second := "https://amp.google/b"
 	in := moderation.Input{
 		Text:     "katso " + first + " ja " + second,
-		Entities: []moderation.Entity{{Type: "url", Offset: 6, Length: len(first)}, {Type: "url", Offset: 6 + len(first) + 4, Length: len(second)}},
+		Entities: []moderation.Entity{{Type: entityURL, Offset: 6, Length: len(first)}, {Type: entityURL, Offset: 6 + len(first) + 4, Length: len(second)}},
 	}
 	urls := moderation.ExtractURLs(in)
 	got, err := moderation.ReplaceURLSpans(in.Text, urls, map[int]string{0: "https://example.test/a", 1: "https://example.test/b"})

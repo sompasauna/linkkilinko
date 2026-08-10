@@ -27,12 +27,13 @@ type Config struct {
 
 // Fetcher downloads bounded public HTTP(S) documents.
 type Fetcher struct {
-	client       *http.Client
-	maxBodyBytes int64
-	maxRedirects int
-	userAgent    string
-	resolver     *net.Resolver
-	totalTimeout time.Duration
+	client         *http.Client
+	maxBodyBytes   int64
+	maxRedirects   int
+	userAgent      string
+	resolver       *net.Resolver
+	requestTimeout time.Duration
+	totalTimeout   time.Duration
 }
 
 type fragmentContextKey struct{}
@@ -49,6 +50,9 @@ func NewFetcher(config Config) (*Fetcher, error) {
 	if config.TotalTimeout <= 0 {
 		return nil, errors.New("metadata: total timeout must be positive")
 	}
+	if config.RequestTimeout >= config.TotalTimeout {
+		return nil, errors.New("metadata: request timeout must be less than total timeout")
+	}
 	if config.MaxBodyBytes <= 0 {
 		return nil, errors.New("metadata: max body bytes must be positive")
 	}
@@ -59,15 +63,21 @@ func NewFetcher(config Config) (*Fetcher, error) {
 		return nil, errors.New("metadata: user agent must not be empty")
 	}
 	fetcher := &Fetcher{
-		maxBodyBytes: config.MaxBodyBytes,
-		maxRedirects: config.MaxRedirects,
-		userAgent:    config.UserAgent,
-		resolver:     net.DefaultResolver,
-		totalTimeout: config.TotalTimeout,
+		maxBodyBytes:   config.MaxBodyBytes,
+		maxRedirects:   config.MaxRedirects,
+		userAgent:      config.UserAgent,
+		resolver:       net.DefaultResolver,
+		requestTimeout: config.RequestTimeout,
+		totalTimeout:   config.TotalTimeout,
 	}
 	fetcher.client = &http.Client{
-		Timeout:   config.RequestTimeout,
-		Transport: &http.Transport{DialContext: fetcher.dialContext},
+		Transport: &http.Transport{
+			DialContext:           fetcher.dialContext,
+			TLSHandshakeTimeout:   config.RequestTimeout,
+			ResponseHeaderTimeout: config.RequestTimeout,
+			ExpectContinueTimeout: config.RequestTimeout,
+			IdleConnTimeout:       config.RequestTimeout,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > config.MaxRedirects {
 				return fmt.Errorf("metadata: redirect limit %d exceeded", config.MaxRedirects)
@@ -78,7 +88,7 @@ func NewFetcher(config Config) (*Fetcher, error) {
 			if state, ok := req.Context().Value(fragmentContextKey{}).(*fragmentState); ok && req.URL.Fragment != "" {
 				state.value = req.URL.Fragment
 			}
-			// Fragments are never transmitted, so strip them before dialing.
+			// Fragments are never transmitted, so strip before dialing.
 			req.URL.Fragment = ""
 			return nil
 		},
@@ -88,6 +98,19 @@ func NewFetcher(config Config) (*Fetcher, error) {
 
 // Fetch gets one bounded public document and returns its final URL.
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (preview.Document, error) {
+	return f.fetch(ctx, rawURL, f.userAgent)
+}
+
+// FetchWithUserAgent performs the same hardened request with a caller-selected
+// crawler identity. All URL and network safety checks remain unchanged.
+func (f *Fetcher) FetchWithUserAgent(ctx context.Context, rawURL, userAgent string) (preview.Document, error) {
+	if strings.TrimSpace(userAgent) == "" {
+		return preview.Document{}, errors.New("metadata: user agent must not be empty")
+	}
+	return f.fetch(ctx, rawURL, userAgent)
+}
+
+func (f *Fetcher) fetch(ctx context.Context, rawURL, userAgent string) (preview.Document, error) {
 	parsedURL, err := parseURL(rawURL)
 	if err != nil {
 		return preview.Document{}, err
@@ -95,17 +118,17 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (preview.Document, e
 	if err := validateURL(parsedURL); err != nil {
 		return preview.Document{}, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, f.totalTimeout)
-	defer cancel()
+	totalCtx, totalCancel := context.WithTimeout(ctx, f.totalTimeout)
+	defer totalCancel()
 	state := &fragmentState{value: parsedURL.Fragment}
-	requestCtx = context.WithValue(requestCtx, fragmentContextKey{}, state)
 	parsedURL.Fragment = ""
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsedURL.String(), nil)
+	totalCtx = context.WithValue(totalCtx, fragmentContextKey{}, state)
+	request, err := http.NewRequestWithContext(totalCtx, http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return preview.Document{}, fmt.Errorf("metadata: create request: %w", err)
 	}
 	request.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.2")
-	request.Header.Set("User-Agent", f.userAgent)
+	request.Header.Set("User-Agent", userAgent)
 	response, err := f.client.Do(request)
 	if err != nil {
 		return preview.Document{}, fmt.Errorf("metadata: fetch %s: %w", parsedURL.Hostname(), err)
@@ -139,17 +162,20 @@ func (f *Fetcher) dialContext(ctx context.Context, network, address string) (net
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
-	dialer := &net.Dialer{}
 	var lastErr error
 	for _, ip := range ips {
 		if !isPublicIP(ip) {
 			continue
 		}
+		dialer := &net.Dialer{Timeout: f.requestTimeout, KeepAlive: f.requestTimeout}
 		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if dialErr == nil {
 			return connection, nil
 		}
 		lastErr = dialErr
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	if lastErr != nil {
 		return nil, fmt.Errorf("dial public address for %s: %w", host, lastErr)

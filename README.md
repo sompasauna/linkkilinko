@@ -12,6 +12,11 @@ The initial executable implementation is in `cmd/linkkilinko`. Read
 [SPEC.md](./SPEC.md) for the complete behavior, Telegram constraints,
 architecture, security model, and acceptance criteria.
 
+This project is dedicated to the public domain under [CC0 1.0](./LICENSE).
+Operators may overlay the selected notice catalog with
+`moderation.notice_catalog: /path/to/catalog.yaml`; unspecified keys retain
+the embedded Finnish catalog text.
+
 ## Development
 
 Prerequisites are Go 1.26.5+, `golangci-lint`, and `govulncheck`.

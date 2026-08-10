@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -39,6 +40,8 @@ func New(token string) (*Client, error) {
 }
 
 // Run receives the explicitly subscribed update kinds until ctx is cancelled.
+// Errors from long polling are logged and retried with bounded exponential backoff;
+// only context cancellation and a closed database may stop Run.
 func (c *Client) Run(ctx context.Context, handler func(context.Context, telego.Update) error) error {
 	if c == nil || c.bot == nil {
 		return errors.New("telegram: client is nil")
@@ -46,27 +49,55 @@ func (c *Client) Run(ctx context.Context, handler func(context.Context, telego.U
 	if handler == nil {
 		return errors.New("telegram: update handler is nil")
 	}
-	updates, err := c.bot.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		Timeout: 30,
-		AllowedUpdates: []string{
-			telego.MessageUpdates,
-			telego.EditedMessageUpdates,
-			telego.ChatMemberUpdates,
-			telego.MyChatMemberUpdates,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("telegram: start long polling: %w", err)
-	}
-	for update := range updates {
-		if err := handler(ctx, update); err != nil {
-			return err
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
+		updates, err := c.bot.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
+			Timeout: 30,
+			AllowedUpdates: []string{
+				telego.MessageUpdates,
+				telego.EditedMessageUpdates,
+				telego.ChatMemberUpdates,
+				telego.MyChatMemberUpdates,
+			},
+		})
+		if err != nil {
+			slog.Error("telegram long polling failed; retrying", "subsystem", "telegram", "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		backoff = time.Second
+		for update := range updates {
+			chatID, messageID := extractUpdateIdentity(update)
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						slog.Error("telegram update handler panicked", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "panic", recovered)
+					}
+				}()
+				if err := handler(ctx, update); err != nil {
+					slog.Error("telegram update handler failed; continuing", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "error", err)
+				}
+			}()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("telegram update stream closed; reconnecting", "subsystem", "telegram")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return errors.New("telegram: update stream closed")
 }
 
 // Delete removes one message from a chat.
@@ -128,6 +159,17 @@ func IsMessageNotFound(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.ErrorCode == 400 && strings.Contains(strings.ToLower(apiErr.Description), "message to delete not found")
 }
 
+// IsDeletePermissionError identifies Telegram responses that require operator
+// intervention rather than an automatic retry loop.
+func IsDeletePermissionError(err error) bool {
+	var apiErr *telegoapi.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	description := strings.ToLower(apiErr.Description)
+	return apiErr.ErrorCode == 400 && (strings.Contains(description, "can't be deleted") || strings.Contains(description, "cannot be deleted") || strings.Contains(description, "not enough rights") || strings.Contains(description, "administrator rights"))
+}
+
 // IsPermanentError reports Telegram client errors that should not be retried forever.
 func IsPermanentError(err error) bool {
 	var apiErr *telegoapi.Error
@@ -144,4 +186,20 @@ func RetryAfter(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(apiErr.Parameters.RetryAfter) * time.Second, true
+}
+
+func extractUpdateIdentity(update telego.Update) (chatID int64, messageID int) {
+	if update.Message != nil {
+		return update.Message.Chat.ID, update.Message.MessageID
+	}
+	if update.EditedMessage != nil {
+		return update.EditedMessage.Chat.ID, update.EditedMessage.MessageID
+	}
+	if update.ChatMember != nil {
+		return update.ChatMember.Chat.ID, 0
+	}
+	if update.MyChatMember != nil {
+		return update.MyChatMember.Chat.ID, 0
+	}
+	return 0, 0
 }
