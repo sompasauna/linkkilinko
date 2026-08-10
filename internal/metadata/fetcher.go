@@ -35,6 +35,12 @@ type Fetcher struct {
 	totalTimeout time.Duration
 }
 
+type fragmentContextKey struct{}
+
+type fragmentState struct {
+	value string
+}
+
 // NewFetcher constructs a hardened metadata fetcher.
 func NewFetcher(config Config) (*Fetcher, error) {
 	if config.RequestTimeout <= 0 {
@@ -69,6 +75,11 @@ func NewFetcher(config Config) (*Fetcher, error) {
 			if err := validateURL(req.URL); err != nil {
 				return fmt.Errorf("metadata: unsafe redirect: %w", err)
 			}
+			if state, ok := req.Context().Value(fragmentContextKey{}).(*fragmentState); ok && req.URL.Fragment != "" {
+				state.value = req.URL.Fragment
+			}
+			// Fragments are never transmitted, so strip them before dialing.
+			req.URL.Fragment = ""
 			return nil
 		},
 	}
@@ -86,6 +97,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (preview.Document, e
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, f.totalTimeout)
 	defer cancel()
+	state := &fragmentState{value: parsedURL.Fragment}
+	requestCtx = context.WithValue(requestCtx, fragmentContextKey{}, state)
+	parsedURL.Fragment = ""
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return preview.Document{}, fmt.Errorf("metadata: create request: %w", err)
@@ -107,8 +121,10 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (preview.Document, e
 	if int64(len(body)) > f.maxBodyBytes {
 		return preview.Document{}, fmt.Errorf("metadata: response exceeds %d bytes", f.maxBodyBytes)
 	}
+	finalURL := *response.Request.URL
+	finalURL.Fragment = state.value
 	return preview.Document{
-		URL:         response.Request.URL,
+		URL:         &finalURL,
 		Body:        body,
 		ContentType: response.Header.Get("Content-Type"),
 	}, nil
@@ -153,8 +169,8 @@ func validateURL(u *url.URL) error {
 	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return errors.New("metadata: only HTTP(S) URLs with a host are supported")
 	}
-	if u.User != nil || u.Fragment != "" {
-		return errors.New("metadata: URL credentials and fragments are not supported")
+	if u.User != nil {
+		return errors.New("metadata: URL credentials are not supported")
 	}
 	if _, err := strconv.Atoi(u.Port()); u.Port() != "" && err != nil {
 		return fmt.Errorf("metadata: invalid port: %w", err)
