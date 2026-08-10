@@ -170,6 +170,14 @@ Required validation:
 3. The newcomer duration is positive and defaults to exactly 48 hours.
 4. Network limits are positive and remain within compiled safety ceilings.
 5. The database directory exists and is writable, or can be created safely.
+6. `notice_language` is non-empty and selects a compiled-in message catalog that
+   defines every notice key policy can emit. Startup fails otherwise.
+
+User-visible notice and replacement text is not written inline in policy or
+transport code. Policy emits a notice key plus parameters; a per-language
+catalog owns the wording quoted throughout this document, and parameters are
+substituted literally so sender-controlled text can never introduce markup or a
+further placeholder.
 
 ## Moderation Pipeline
 

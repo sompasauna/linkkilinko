@@ -18,6 +18,7 @@ import (
 	"github.com/mymmrac/telego"
 	"github.com/sompasauna/linkkilinko/internal/config"
 	"github.com/sompasauna/linkkilinko/internal/metadata"
+	"github.com/sompasauna/linkkilinko/internal/notice"
 	"github.com/sompasauna/linkkilinko/internal/store"
 	"github.com/sompasauna/linkkilinko/internal/telegram"
 	"github.com/sompasauna/linkkilinko/pkg/core/link"
@@ -30,6 +31,13 @@ const behaviorVersion = "v0.1"
 const (
 	operationText      = "text"
 	operationCopyMedia = "copy_media"
+)
+
+// Telegram caps message text at 4096 and media captions at 1024 characters.
+// Stay below both so entity offsets never land past a truncated tail.
+const (
+	messageTextLimit = 3900
+	captionTextLimit = 1000
 )
 
 func main() {
@@ -47,6 +55,10 @@ func main() {
 
 func run(parent context.Context, configPath string) error {
 	runtimeConfig, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	notices, err := notice.Load(runtimeConfig.Moderation.NoticeLanguage)
 	if err != nil {
 		return err
 	}
@@ -97,6 +109,7 @@ func run(parent context.Context, configPath string) error {
 		metadata:     metadataFetcher,
 		links:        linkRegistry,
 		previews:     previewRegistry,
+		notices:      notices,
 		now:          time.Now,
 	}
 	stopHealth := startHealthServer(ctx, app, runtimeConfig.Operational.HealthListen)
@@ -113,6 +126,7 @@ type application struct {
 	metadata       *metadata.Fetcher
 	links          link.Registry
 	previews       preview.Registry
+	notices        notice.Catalog
 	now            func() time.Time
 	updatesSeen    atomic.Uint64
 	lastUpdateUnix atomic.Int64
@@ -261,7 +275,8 @@ func (a *application) handleResolvedWrappers(ctx context.Context, input moderati
 		Action:      moderation.ActionReplace,
 		Rule:        "google-wrapper",
 		Fingerprint: moderation.Fingerprint(input, "google-wrapper"),
-		Replacement: fmt.Sprintf("Käyttäjä %s lähetti linkin, joka vaihdettiin suoraan linkkiin:\n%s", input.SenderName, replaced),
+		NoticeKey:   moderation.NoticeGoogleWrapper,
+		Params:      map[string]string{"sender": input.SenderName, "content": replaced},
 	}
 	return a.applyPlan(ctx, input, plan)
 }
@@ -300,10 +315,15 @@ func (a *application) previewPlan(ctx context.Context, input moderation.Input, u
 	switch {
 	case useful && input.PreviewDisabled:
 		plan.Action = moderation.ActionReplace
-		plan.Replacement = enrichedPreview(input, urls, previews)
+		plan.NoticeKey = moderation.NoticePreviewEnriched
+		plan.Params = map[string]string{
+			"sender":   input.SenderName,
+			"url":      urls[0].Target,
+			"metadata": previewMetadataLines(previews),
+		}
 	case !useful:
 		plan.Action = moderation.ActionDelete
-		plan.Notice = "Linkistä ei ollut saatavilla esikatselutietoa. Voit lähettää linkin uudelleen, mutta kerro mitä linkin takaa löytyy."
+		plan.NoticeKey = moderation.NoticePreviewMissing
 	default:
 		return moderation.Plan{}, false
 	}
@@ -333,14 +353,14 @@ func (a *application) applyPlan(ctx context.Context, input moderation.Input, pla
 	if found {
 		return a.suppressDuplicate(ctx, input, canonical)
 	}
-	text := plan.Notice
-	if plan.Action == moderation.ActionReplace {
-		text = plan.Replacement
+	text := truncateRunes(a.notices.Render(plan.NoticeKey, plan.Params), messageTextLimit)
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("notice %q rendered empty for rule %s", plan.NoticeKey, plan.Rule)
 	}
 	payload := responsePayload{Text: text, Entities: responseEntities(text, input.SenderName, input.SenderID), Operation: operationText}
 	if plan.Rule == "google-wrapper" && input.MediaKind != "" && input.Caption != "" {
 		payload.Operation = operationCopyMedia
-		payload.Text = truncateRunes(text, 1000)
+		payload.Text = truncateRunes(text, captionTextLimit)
 		payload.Entities = responseEntities(payload.Text, input.SenderName, input.SenderID)
 		payload.FallbackText = text
 		payload.FallbackItems = payload.Entities
@@ -645,9 +665,10 @@ func senderName(user telego.User) string {
 	return fmt.Sprintf("käyttäjä %d", user.ID)
 }
 
-func enrichedPreview(in moderation.Input, urls []moderation.URL, metadata []preview.Metadata) string {
+// previewMetadataLines renders compact metadata for each URL in original order
+// as the {metadata} parameter of the enriched-preview notice.
+func previewMetadataLines(metadata []preview.Metadata) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Käyttäjä %s lähetti linkin %s ilman esikatselutietoja. Esikatselutiedot haettiin automaattisesti tähän viestiin.\n\n", in.SenderName, urls[0].Target)
 	for _, item := range metadata {
 		for _, value := range []string{item.SiteName, item.Title, item.Description} {
 			if strings.TrimSpace(value) != "" {
@@ -656,7 +677,7 @@ func enrichedPreview(in moderation.Input, urls []moderation.URL, metadata []prev
 			}
 		}
 	}
-	return truncateRunes(strings.TrimSpace(b.String()), 3900)
+	return strings.TrimSpace(b.String())
 }
 
 func truncateRunes(value string, limit int) string {

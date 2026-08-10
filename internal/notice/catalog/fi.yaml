@@ -1,0 +1,25 @@
+# User-visible moderation copy. The wording here is specified by SPEC.md;
+# change both together. Placeholders are substituted literally, so never add
+# Telegram markup around {sender}, {url}, {content}, or {metadata}.
+
+# Newcomer sandbox notice. SPEC.md "Newcomer Sandbox".
+newcomer.sandbox: |-
+  Alle 48 tuntia kanavalla olleet eivät voi lähettää mediaa tai linkkejä. Tällä estetään spämmäystä. Jos asia on tärkeä (kuvat kadonneista esineistä jne.), joku kanavalla kauemmin ollut voi auttaa välittämään sen.
+
+# Tracked-link replacement. SPEC.md "Tracked-Link Rewriting".
+google.wrapper.replacement: |-
+  Käyttäjien dataa mainonta- ja seurantatarkoituksiin keräävä linkki vaihdettu suoraan linkkiin.
+
+  Käyttäjä {sender} lähetti:
+  {content}
+
+# Link-only post whose metadata probe found nothing useful. SPEC.md
+# "Link-only Preview Policy".
+preview.missing: |-
+  Linkistä ei ollut saatavilla esikatselutietoa. Voit lähettää linkin uudelleen, mutta kerro mitä linkin takaa löytyy.
+
+# Link-only post with previews explicitly disabled and useful metadata found.
+preview.enriched: |-
+  Käyttäjä {sender} lähetti linkin {url} ilman esikatselutietoja. Esikatselutiedot haettiin automaattisesti tähän viestiin.
+
+  {metadata}

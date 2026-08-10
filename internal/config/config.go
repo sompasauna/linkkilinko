@@ -112,6 +112,9 @@ func (c Config) Validate() error {
 	if time.Duration(c.Moderation.NewcomerSandbox) <= 0 {
 		return errors.New("config: newcomer_sandbox must be positive")
 	}
+	if strings.TrimSpace(c.Moderation.NoticeLanguage) == "" {
+		return errors.New("config: notice_language is empty")
+	}
 	if time.Duration(c.Metadata.RequestTimeout) <= 0 || time.Duration(c.Metadata.TotalTimeout) <= 0 {
 		return errors.New("config: metadata timeouts must be positive")
 	}

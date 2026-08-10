@@ -29,10 +29,3 @@ Copy [config.example.yaml](./config.example.yaml), set the token through
 ```bash
 go run ./cmd/linkkilinko -config config.yaml
 ```
-
-The current slice handles text and caption policy actions, copies supported
-rewritten media captions, persists moderation outbox work, and retries failed
-Telegram side effects. Unsupported or protected media falls back to text.
-Optional local health endpoints can be enabled in configuration. 
-
-PS. Never commit a Telegram bot token or runtime database.

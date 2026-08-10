@@ -101,13 +101,35 @@ const (
 	ActionReplace Action = "replace"
 )
 
+// Notice keys identify the user-visible message a plan renders. Policy never
+// carries rendered text: the composition layer resolves a key and its
+// parameters through a language catalog.
+const (
+	// NoticeNewcomerSandbox explains the 48-hour link and media restriction.
+	NoticeNewcomerSandbox = "newcomer.sandbox"
+	// NoticeGoogleWrapper introduces a replaced tracking or wrapper link and
+	// takes the {sender} and {content} parameters.
+	NoticeGoogleWrapper = "google.wrapper.replacement"
+	// NoticePreviewMissing explains that a link-only post lacked preview data.
+	NoticePreviewMissing = "preview.missing"
+	// NoticePreviewEnriched introduces fetched preview data and takes the
+	// {sender}, {url}, and {metadata} parameters.
+	NoticePreviewEnriched = "preview.enriched"
+)
+
+// NoticeKeys returns every notice key a plan can emit. A catalog must define
+// all of them.
+func NoticeKeys() []string {
+	return []string{NoticeNewcomerSandbox, NoticeGoogleWrapper, NoticePreviewMissing, NoticePreviewEnriched}
+}
+
 // Plan describes a moderation action without performing any side effects.
 type Plan struct {
 	Action      Action
 	Rule        string
 	Fingerprint string
-	Notice      string
-	Replacement string
+	NoticeKey   string
+	Params      map[string]string
 }
 
 // ExtractURLs returns HTTP(S) URLs from text or caption entities.
@@ -223,7 +245,7 @@ func NewcomerPlan(in Input, joinedAt, now time.Time, window time.Duration) (Plan
 		Action:      ActionDelete,
 		Rule:        "newcomer-sandbox",
 		Fingerprint: Fingerprint(in, "newcomer-sandbox"),
-		Notice:      "Alle 48 tuntia kanavalla olleet eivät voi lähettää mediaa tai linkkejä. Tällä estetään spämmäystä. Jos asia on tärkeä (kuvat kadonneista esineistä jne.), joku kanavalla kauemmin ollut voi auttaa välittämään sen.",
+		NoticeKey:   NoticeNewcomerSandbox,
 	}, true
 }
 
