@@ -148,12 +148,6 @@ func NewGoogleResolvers(fetcher Fetcher) (GoogleShareResolver, GoogleAMPResolver
 	return GoogleShareResolver{share}, GoogleAMPResolver{amp}, nil
 }
 
-// NewGoogleResolver is retained for source compatibility and returns the AMP resolver.
-func NewGoogleResolver(fetcher Fetcher) (GoogleAMPResolver, error) {
-	_, amp, err := NewGoogleResolvers(fetcher)
-	return amp, err
-}
-
 // Name returns the stable resolver name.
 func (r googleResolver) Name() string {
 	if r.canonical {
