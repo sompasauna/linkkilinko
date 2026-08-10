@@ -1,7 +1,5 @@
 telegram:
   token: ""
-  allowed_chat_ids:
-    - 1234
 
 database:
   path: "./linkkilinko.sqlite"
@@ -18,7 +16,6 @@ metadata:
   max_redirects: 5
   max_html_bytes: 2097152
   user_agent: "linkkilinko/0.1"
-  facebook_user_agent: "linkkilinko-facebook/0.1"
 
 # Optional local HTTP health endpoints. Empty keeps the listener disabled.
 operational:

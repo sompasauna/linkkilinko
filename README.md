@@ -32,6 +32,15 @@ resolve, delete the original, then post a bot-authored replacement. That is why
 the replacement always names the original sender: the message has changed hands,
 and attribution is what keeps the conversation legible.
 
+Telegram clients recognize and preview a bare address like
+`github.com/owner/repository` even with no `http://` or `https://` typed, and
+the Bot API reports it as a `url` entity the same as an explicit link. The bot
+follows that recognition: the visible text stays exactly as sent, and
+`https://` is used only internally to resolve, fetch, and fingerprint it, so
+the scheme-less and explicit HTTPS spellings of the same address are moderated
+identically. An explicit non-HTTP link, such as `ftp://` or a Telegram deep
+link, is never reinterpreted this way.
+
 ### Newcomer sandbox
 
 The 48-hour window replaces the separate Daysandbox bot. Link and media spam in
@@ -52,24 +61,12 @@ Telegram reports a member's current status but not when they joined.
 The bot must be an **administrator with permission to delete messages** in every
 group it moderates. Without that, it cannot act, and group approval is refused.
 
-A group becomes active in one of two ways:
-
-1. **Owner bootstrap.** The first private `/start` the bot receives registers
-   that sender as the durable owner; later claims from anyone else are rejected.
-   When that owner then adds the bot to a group and promotes it to administrator,
-   the bot verifies its delete permission and approves the group automatically.
-   Approval is stored in SQLite and survives restarts. Groups added by anyone
-   else stay inert.
-2. **Configured allowlist.** Chat ids listed under `telegram.allowed_chat_ids`
-   are always treated as active. This is checked *before* the persisted
-   approvals, so it is an override: a chat id listed there is moderated without
-   any owner approval.
-
-**Current limitation:** `allowed_chat_ids` must presently be non-empty or the
-bot refuses to start, so owner bootstrap cannot yet be used on its own. Until
-that is fixed, `config.example.yaml` ships a placeholder id — note a placeholder
-is *not* inert, since any chat matching it is moderated without owner approval.
-Pick an id you control.
+A group becomes active through **owner bootstrap**: the first private `/start`
+the bot receives registers that sender as the durable owner; later claims from
+anyone else are rejected. When that owner then adds the bot to a group and
+promotes it to administrator, the bot verifies its delete permission and
+approves the group automatically. Approval is stored in SQLite and survives
+restarts. Groups added by anyone else stay inert.
 
 There are no commands in groups. Private `/start` is the only interaction.
 
@@ -86,6 +83,28 @@ boot rather than sent to a chat.
 
 The sandbox length is `moderation.newcomer_sandbox`, and the metadata probe's
 timeouts, redirect limit, and body limit live under `metadata`.
+
+## Observability
+
+Every message that contains URLs produces one structured `moderation decision`
+log line at INFO (or WARN for fail-open outcomes), plus one `url reasoning`
+line per URL carrying the resolved resolver name, destination host, metadata
+provider, useful/inconclusive result, fetch error class, and outcome. The
+summary line carries `chat_id`, `thread_id`, `message_id`, `sender_id`,
+`url_count`, `link_only`, `preview_options`, `preview_disabled`, `multi_link`,
+`outcome`, `rule`, and `duration_ms`. `subsystem=moderation` is set on every
+line so an operator can filter one message across the Telegram adapter,
+resolver, metadata, store, and outbox stages.
+
+Full URLs are never written to logs. Only the host and a `url_has_query`
+flag are recorded; query values are redacted. Bot tokens, response bodies,
+and sender-controlled message text are also out of bounds for logging.
+
+When a message is reported with `preview_disabled=true` and the bot appears
+not to rewrite or delete it, check the `outcome` field on the terminal line
+and the corresponding `url reasoning` lines: a `fail_open` outcome means
+metadata could not be fetched within the configured budget, while a missing
+`preview_disabled` entry on the URL entity is a Telegram client limitation.
 
 ## Development
 

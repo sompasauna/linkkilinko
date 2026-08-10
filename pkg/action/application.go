@@ -4,8 +4,10 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -22,18 +24,69 @@ import (
 
 const behaviorVersion = "v0.3"
 
+// Terminal outcome categories used in moderation decision summaries so log
+// queries can filter on outcome without parsing free-form text.
 const (
-	operationText      = "text"
-	operationCopyMedia = "copy_media"
-	messageTextLimit   = 3900
-	captionTextLimit   = 1000
+	outcomeAllow           = "allow"
+	outcomeReplace         = "replace"
+	outcomeDelete          = "delete"
+	outcomeDuplicate       = "duplicate_suppressed"
+	outcomeFailOpen        = "fail_open"
+	outcomeResolverNoMatch = "resolver_no_match"
+	outcomePreviewUseful   = "preview_useful"
+)
+
+// previewProviderLabel is a debug-friendly identifier for the preview
+// provider in use, kept in logs only.
+const previewProviderLabel = "generic_html"
+
+const (
+	operationText       = "text"
+	operationCopyMedia  = "copy_media"
+	messageTextLimit    = 3900
+	captionTextLimit    = 1000
+	placeholderSender   = "sender"
+	placeholderContent  = "content"
+	placeholderURL      = "url"
+	placeholderMetadata = "metadata"
+)
+
+// Stable field names used across subsystem-scoped moderation logs so an
+// operator can query one message from the Telegram adapter through the outbox.
+const (
+	fieldSubsystem           = "subsystem"
+	fieldUpdateID            = "update_id"
+	fieldChatID              = "chat_id"
+	fieldThreadID            = "thread_id"
+	fieldMessageID           = "message_id"
+	fieldSenderID            = "sender_id"
+	fieldURLCount            = "url_count"
+	fieldURLIndex            = "url_index"
+	fieldURLHost             = "url_host"
+	fieldURLHasQuery         = "url_has_query"
+	fieldLinkOnly            = "link_only"
+	fieldPreviewOptions      = "preview_options"
+	fieldPreviewDisabled     = "preview_disabled"
+	fieldRule                = "rule"
+	fieldOutcome             = "outcome"
+	fieldDurationMS          = "duration_ms"
+	fieldResolverName        = "resolver_name"
+	fieldResolverMatched     = "resolver_matched"
+	fieldResolutionOutcome   = "resolution_outcome"
+	fieldDestinationHost     = "destination_host"
+	fieldMetadataProvider    = "metadata_provider"
+	fieldPreviewUseful       = "preview_useful"
+	fieldPreviewInconclusive = "preview_inconclusive"
+	fieldFetchErrorClass     = "fetch_error_class"
+	fieldMultiLink           = "multi_link"
+	fieldURLIndexes          = "url_indexes"
+	fieldFailureOpen         = "fail_open"
 )
 
 // Application composes the pure core packages with the Telegram, storage,
 // metadata, and notice ports to run the moderation workflow.
 type Application struct {
 	config         config.Config
-	allowedChats   map[int64]struct{}
 	client         TelegramPort
 	state          StorePort
 	metadata       MetadataPort
@@ -44,6 +97,7 @@ type Application struct {
 	updatesSeen    atomic.Uint64
 	lastUpdateUnix atomic.Int64
 	outboxNudge    chan struct{}
+	logger         *slog.Logger
 }
 
 // TelegramPort contains the Telegram side effects required by moderation.
@@ -92,7 +146,6 @@ type StorePort interface {
 // MetadataPort provides bounded URL retrieval.
 type MetadataPort interface {
 	Fetch(ctx context.Context, rawURL string) (preview.Document, error)
-	FetchWithUserAgent(ctx context.Context, rawURL, userAgent string) (preview.Document, error)
 }
 
 // LinkPort resolves tracked links.
@@ -104,7 +157,6 @@ type LinkPort interface {
 // PreviewPort extracts metadata and identifies inconclusive providers.
 type PreviewPort interface {
 	Inspect(document preview.Document) (preview.Metadata, string)
-	IsInconclusive(document preview.Document) bool
 }
 
 // NoticePort renders a validated user-visible message.
@@ -140,10 +192,13 @@ func (a *Application) moderateLinks(ctx context.Context, input moderation.Input)
 	if len(urls) == 0 {
 		return nil
 	}
+	started := a.now()
+	trace := newURLTrace(input, urls, a.now)
 	destinations := make(map[int]string)
 	matchedWrapper := false
 	for index, candidate := range urls {
 		resolverName, matched := a.links.MatchName(candidate.Target)
+		trace.recordResolver(index, resolverName, matched)
 		if !matched {
 			continue
 		}
@@ -152,35 +207,62 @@ func (a *Application) moderateLinks(ctx context.Context, input moderation.Input)
 		if canonical, found, err := a.state.FindCanonical(ctx, input.ChatID, input.ThreadID, input.SenderID, resolverName, behaviorVersion, fingerprint); err != nil {
 			return err
 		} else if found {
+			trace.recordOutcome(index, outcomeDuplicate)
+			a.emitTerminalDecision(trace, started)
 			return a.suppressDuplicate(ctx, input, canonical)
 		}
 		resolution, matched, err := a.links.Resolve(ctx, candidate.Target)
 		if err != nil {
-			slog.Warn("link resolution failed", "host", safeHost(candidate.Target), "error", err)
+			a.logger.Warn("link resolution failed",
+				fieldChatID, input.ChatID,
+				fieldMessageID, input.MessageID,
+				fieldURLIndex, index,
+				fieldURLHost, safeHost(candidate.Target),
+				"error", err,
+			)
+			trace.recordOutcome(index, outcomeFailOpen)
+			a.emitTerminalDecision(trace, started)
 			return nil
 		}
 		if !matched || resolution.Destination == nil || resolution.Destination.String() == candidate.Target {
+			trace.recordOutcome(index, outcomeResolverNoMatch)
 			continue
 		}
 		destinations[index] = resolution.Destination.String()
+		trace.recordResolution(index, resolution.Destination.String(), true)
 	}
 	if matchedWrapper && len(destinations) > 0 {
-		return a.handleResolvedWrappers(ctx, input, urls, destinations)
+		trace.markResolverPhase()
+		if err := a.handleResolvedWrappersTraced(ctx, input, urls, destinations, trace); err != nil {
+			return err
+		}
+		a.emitTerminalDecision(trace, started)
+		return nil
 	}
 
 	if !moderation.IsLinkOnly(input) {
+		trace.recordMessageOutcome(outcomeAllow, "non_link_only")
+		a.emitTerminalDecision(trace, started)
 		return nil
 	}
 	fingerprint := moderation.Fingerprint(input, "link-preview")
 	if canonical, found, err := a.state.FindCanonical(ctx, input.ChatID, input.ThreadID, input.SenderID, "link-preview", behaviorVersion, fingerprint); err != nil {
 		return err
 	} else if found {
+		trace.recordMessageOutcome(outcomeDuplicate, "link_preview")
+		a.emitTerminalDecision(trace, started)
 		return a.suppressDuplicate(ctx, input, canonical)
 	}
-	return a.moderatePreview(ctx, input, urls)
+	plan, actionable := a.moderatePreviewTraced(ctx, input, urls, trace)
+	if actionable {
+		a.emitTerminalDecision(trace, started)
+		return a.applyPlan(ctx, input, plan)
+	}
+	a.emitTerminalDecision(trace, started)
+	return nil
 }
 
-func (a *Application) handleResolvedWrappers(ctx context.Context, input moderation.Input, urls []moderation.URL, destinations map[int]string) error {
+func (a *Application) handleResolvedWrappersTraced(ctx context.Context, input moderation.Input, urls []moderation.URL, destinations map[int]string, trace *urlTrace) error {
 	replaced, err := moderation.ReplaceURLSpans(messageText(input), urls, destinations)
 	if err != nil {
 		return fmt.Errorf("rewrite links: %w", err)
@@ -193,18 +275,22 @@ func (a *Application) handleResolvedWrappers(ctx context.Context, input moderati
 			return findErr
 		}
 		if found {
+			trace.recordMessageOutcome(outcomeDuplicate, "link-preview")
 			return a.suppressDuplicate(ctx, input, canonical)
 		}
-		previewPlan, actionable := a.previewPlan(ctx, input, resolved)
+		previewPlan, actionable := a.moderatePreviewTraced(ctx, input, resolved, trace)
 		if actionable && (previewPlan.Action == moderation.ActionDelete || input.PreviewDisabled) {
 			return a.applyPlan(ctx, input, previewPlan)
 		}
 	}
 	rule := "google-share"
+	lowestIndex := len(urls)
 	for index := range destinations {
-		if resolutionRule, matched := a.links.MatchName(urls[index].Target); matched {
-			rule = resolutionRule
-			break
+		if index < lowestIndex {
+			if resolutionRule, matched := a.links.MatchName(urls[index].Target); matched {
+				rule = resolutionRule
+				lowestIndex = index
+			}
 		}
 	}
 	plan := moderation.Plan{
@@ -212,32 +298,43 @@ func (a *Application) handleResolvedWrappers(ctx context.Context, input moderati
 		Rule:        rule,
 		Fingerprint: moderation.Fingerprint(input, rule),
 		NoticeKey:   moderation.NoticeGoogleWrapper,
-		Params:      map[string]string{"sender": input.SenderName, "content": replaced},
+		Params:      map[string]string{placeholderSender: input.SenderName, placeholderContent: replaced},
 	}
+	for index := range destinations {
+		if trace.decisions[index].outcome == "" {
+			trace.recordOutcome(index, outcomeReplace)
+		}
+	}
+	trace.recordMessageOutcome(outcomeReplace, rule)
 	return a.applyPlan(ctx, input, plan)
 }
 
-func (a *Application) moderatePreview(ctx context.Context, input moderation.Input, urls []moderation.URL) error {
-	plan, actionable := a.previewPlan(ctx, input, urls)
-	if !actionable {
-		return nil
-	}
-	return a.applyPlan(ctx, input, plan)
-}
-
-func (a *Application) previewPlan(ctx context.Context, input moderation.Input, urls []moderation.URL) (moderation.Plan, bool) {
+// moderatePreviewTraced runs the preview-policy decision and records per-URL
+// reasoning onto trace. The fetch failure class is captured so the terminal
+// decision log distinguishes fail-open from definitive no-metadata.
+func (a *Application) moderatePreviewTraced(ctx context.Context, input moderation.Input, urls []moderation.URL, trace *urlTrace) (moderation.Plan, bool) {
+	trace.markPreviewPhase()
 	var previews []preview.Metadata
-	for _, candidate := range urls {
+	for index, candidate := range urls {
 		document, err := a.fetchMetadata(ctx, candidate.Target)
 		if err != nil {
-			slog.Warn("link metadata fetch failed", "host", safeHost(candidate.Target), "error", err)
+			a.logger.Warn("link metadata fetch failed",
+				fieldChatID, input.ChatID,
+				fieldMessageID, input.MessageID,
+				fieldURLIndex, index,
+				fieldURLHost, safeHost(candidate.Target),
+				fieldFetchErrorClass, classifyFetchError(err),
+				"error", err,
+			)
+			trace.recordMetadata(index, previewProviderLabel, false, true, classifyFetchError(err))
+			trace.recordOutcome(index, outcomeFailOpen)
+			trace.recordMessageOutcome(outcomeFailOpen, "link-preview")
 			return moderation.Plan{}, false
 		}
 		metadata, _ := a.previews.Inspect(document)
-		if a.previews.IsInconclusive(document) && !metadata.Useful() {
-			return moderation.Plan{}, false
-		}
 		previews = append(previews, metadata)
+		trace.recordMetadata(index, previewProviderLabel, metadata.Useful(), false, "")
+		trace.recordOutcome(index, outcomePreviewUseful)
 	}
 	useful := len(previews) > 0
 	for _, metadata := range previews {
@@ -256,13 +353,18 @@ func (a *Application) previewPlan(ctx context.Context, input moderation.Input, u
 		plan.Action = moderation.ActionReplace
 		plan.NoticeKey = moderation.NoticePreviewEnriched
 		plan.Params = map[string]string{
-			"sender":   input.SenderName,
-			"url":      urls[0].Target,
-			"metadata": previewMetadataLines(previews),
+			placeholderSender:   input.SenderName,
+			placeholderURL:      urls[0].Target,
+			placeholderMetadata: previewMetadataLines(previews),
 		}
+		trace.recordMessageOutcome(outcomeReplace, "link-preview")
 	case !useful:
 		plan.Action = moderation.ActionDelete
 		plan.NoticeKey = moderation.NoticePreviewMissing
+		plan.Params = map[string]string{
+			placeholderSender: input.SenderName,
+		}
+		trace.recordMessageOutcome(outcomeDelete, "link-preview")
 	default:
 		return moderation.Plan{}, false
 	}
@@ -270,16 +372,6 @@ func (a *Application) previewPlan(ctx context.Context, input moderation.Input, u
 }
 
 func (a *Application) fetchMetadata(ctx context.Context, rawURL string) (preview.Document, error) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return preview.Document{}, err
-	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	switch host {
-	case "facebook.com", "www.facebook.com", "m.facebook.com", "mbasic.facebook.com", "fb.watch", "fb.me":
-		parsed.Host = "mbasic.facebook.com"
-		return a.metadata.FetchWithUserAgent(ctx, parsed.String(), a.config.Metadata.FacebookUserAgent)
-	}
 	return a.metadata.Fetch(ctx, rawURL)
 }
 
@@ -624,18 +716,235 @@ func safeHost(raw string) string {
 	return u.Hostname()
 }
 
+// classifyFetchError reduces a metadata fetch error to a short stable label
+// so logs and tests can reason about transient versus permanent failures.
+func classifyFetchError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "transient_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "transient_cancelled"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "transient_timeout"
+	}
+	return "permanent"
+}
+
+// urlDecision is the per-URL reasoning captured during moderation. It is
+// recorded locally so a single terminal decision log can summarize every URL
+// without re-walking the message.
+type urlDecision struct {
+	index               int
+	raw                 string
+	host                string
+	hasQuery            bool
+	resolverName        string
+	resolverMatched     bool
+	resolved            bool
+	destinationHost     string
+	metadataProvider    string
+	previewUseful       bool
+	previewInconclusive bool
+	fetchErrorClass     string
+	outcome             string
+}
+
+// urlTrace carries the per-message reasoning state and exposes a method to
+// emit the terminal decision summary.
+type urlTrace struct {
+	input          moderation.Input
+	urls           []moderation.URL
+	decisions      []urlDecision
+	resolverPhase  bool
+	previewPhase   bool
+	messageOutcome string
+	messageReason  string
+	startedAt      time.Time
+	now            func() time.Time
+}
+
+func newURLTrace(input moderation.Input, urls []moderation.URL, now func() time.Time) *urlTrace {
+	decisions := make([]urlDecision, len(urls))
+	for index, candidate := range urls {
+		decisions[index] = urlDecision{
+			index:    index,
+			raw:      candidate.Target,
+			host:     safeHost(candidate.Target),
+			hasQuery: urlHasQuery(candidate.Target),
+		}
+	}
+	return &urlTrace{
+		input:     input,
+		urls:      urls,
+		decisions: decisions,
+		now:       now,
+		startedAt: now(),
+	}
+}
+
+func (t *urlTrace) recordResolver(index int, name string, matched bool) {
+	t.decisions[index].resolverName = name
+	t.decisions[index].resolverMatched = matched
+}
+
+func (t *urlTrace) recordResolution(index int, destination string, matched bool) {
+	t.decisions[index].resolved = matched
+	t.decisions[index].destinationHost = safeHost(destination)
+}
+
+func (t *urlTrace) recordMetadata(index int, provider string, useful, inconclusive bool, errClass string) {
+	t.decisions[index].metadataProvider = provider
+	t.decisions[index].previewUseful = useful
+	t.decisions[index].previewInconclusive = inconclusive
+	t.decisions[index].fetchErrorClass = errClass
+}
+
+func (t *urlTrace) recordOutcome(index int, outcome string) {
+	t.decisions[index].outcome = outcome
+}
+
+func (t *urlTrace) markResolverPhase() {
+	t.resolverPhase = true
+}
+
+func (t *urlTrace) markPreviewPhase() {
+	t.previewPhase = true
+}
+
+func (t *urlTrace) recordMessageOutcome(outcome, reason string) {
+	t.messageOutcome = outcome
+	t.messageReason = reason
+}
+
+// urlIndexesWith returns the indexes whose recorded outcome equals want. Used
+// to make multi-link reasoning explicit in the terminal log.
+func (t *urlTrace) urlIndexesWith(outcome string) []int {
+	var indexes []int
+	for _, decision := range t.decisions {
+		if decision.outcome == outcome {
+			indexes = append(indexes, decision.index)
+		}
+	}
+	return indexes
+}
+
+func urlHasQuery(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.RawQuery != ""
+}
+
+// emitTerminalDecision writes the per-message decision summary plus the
+// correlated per-URL reasoning logs. Sensitive URL data is reduced to host
+// plus a query-presence flag; full URLs are not recorded.
+func (a *Application) emitTerminalDecision(trace *urlTrace, started time.Time) {
+	if trace == nil {
+		return
+	}
+	durationMS := trace.now().Sub(started).Milliseconds()
+	replaceIndexes := trace.urlIndexesWith(outcomeReplace)
+	deleteIndexes := trace.urlIndexesWith(outcomeDelete)
+	failOpenIndexes := trace.urlIndexesWith(outcomeFailOpen)
+	previewOptionsPresent := trace.input.PreviewDisabled || hasPreviewEntities(trace.input.Entities) || hasPreviewEntities(trace.input.CaptionEntities)
+	summary := a.logger.With(
+		fieldChatID, trace.input.ChatID,
+		fieldThreadID, trace.input.ThreadID,
+		fieldMessageID, trace.input.MessageID,
+		fieldSenderID, trace.input.SenderID,
+		fieldURLCount, len(trace.decisions),
+		fieldLinkOnly, moderation.IsLinkOnly(trace.input),
+		fieldPreviewOptions, previewOptionsPresent,
+		fieldPreviewDisabled, trace.input.PreviewDisabled,
+		fieldMultiLink, len(trace.decisions) > 1,
+		fieldOutcome, trace.messageOutcome,
+		fieldRule, trace.messageReason,
+		fieldDurationMS, durationMS,
+	)
+	switch {
+	case len(replaceIndexes) > 0:
+		summary.Info("moderation decision",
+			fieldOutcome, outcomeReplace,
+			fieldURLIndexes, replaceIndexes,
+		)
+	case len(deleteIndexes) > 0:
+		summary.Info("moderation decision",
+			fieldOutcome, outcomeDelete,
+			fieldURLIndexes, deleteIndexes,
+		)
+	case len(failOpenIndexes) > 0:
+		summary.Warn("moderation decision",
+			fieldOutcome, outcomeFailOpen,
+			fieldURLIndexes, failOpenIndexes,
+		)
+	default:
+		summary.Info("moderation decision")
+	}
+	for _, decision := range trace.decisions {
+		a.logger.Info("url reasoning",
+			fieldChatID, trace.input.ChatID,
+			fieldMessageID, trace.input.MessageID,
+			fieldURLIndex, decision.index,
+			fieldURLHost, decision.host,
+			fieldURLHasQuery, decision.hasQuery,
+			fieldResolverName, decision.resolverName,
+			fieldResolverMatched, decision.resolverMatched,
+			fieldResolutionOutcome, resolutionOutcomeLabel(decision),
+			fieldDestinationHost, decision.destinationHost,
+			fieldMetadataProvider, decision.metadataProvider,
+			fieldPreviewUseful, decision.previewUseful,
+			fieldPreviewInconclusive, decision.previewInconclusive,
+			fieldFetchErrorClass, decision.fetchErrorClass,
+			fieldOutcome, decision.outcome,
+		)
+	}
+}
+
+func resolutionOutcomeLabel(decision urlDecision) string {
+	switch {
+	case !decision.resolverMatched:
+		return "no_resolver_match"
+	case decision.resolved:
+		return "resolved"
+	default:
+		return "resolver_did_not_apply"
+	}
+}
+
+func hasPreviewEntities(entities []moderation.Entity) bool {
+	for _, entity := range entities {
+		if entity.Type == "text_link" || entity.Type == "url" {
+			return true
+		}
+	}
+	return false
+}
+
 // New constructs the moderation workflow over the supplied ports. The now
 // function is injected so policy timing stays deterministic under test.
 func New(cfg config.Config, client TelegramPort, state StorePort, metadataFetcher MetadataPort, links LinkPort, previews PreviewPort, notices NoticePort, now func() time.Time) *Application {
-	allowedChats := make(map[int64]struct{}, len(cfg.Telegram.AllowedChatIDs))
-	for _, chatID := range cfg.Telegram.AllowedChatIDs {
-		allowedChats[chatID] = struct{}{}
-	}
 	return &Application{
-		config: cfg, allowedChats: allowedChats, client: client, state: state,
+		config: cfg, client: client, state: state,
 		metadata: metadataFetcher, links: links, previews: previews, notices: notices,
 		now: now, outboxNudge: make(chan struct{}, 1),
+		logger: slog.Default().With(fieldSubsystem, "moderation"),
 	}
+}
+
+// SetLogger replaces the subsystem-scoped moderation logger. Callers that do
+// not configure a logger get slog.Default() with subsystem=moderation.
+func (a *Application) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		a.logger = slog.Default().With(fieldSubsystem, "moderation")
+		return
+	}
+	a.logger = logger.With(fieldSubsystem, "moderation")
 }
 
 // OutboxLoop delivers pending moderation responses until ctx is cancelled,

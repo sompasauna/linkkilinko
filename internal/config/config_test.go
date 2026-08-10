@@ -12,7 +12,7 @@ import (
 func TestLoadAppliesDefaultsAndEnvironmentToken(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
-	if err := os.WriteFile(path, []byte("telegram:\n  allowed_chat_ids: [-1001]\ndatabase:\n  path: state.sqlite\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("telegram:\n  token: token\ndatabase:\n  path: state.sqlite\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LINKKILINKO_TELEGRAM_TOKEN", "token")
@@ -27,7 +27,7 @@ func TestLoadAppliesDefaultsAndEnvironmentToken(t *testing.T) {
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("telegram:\n  allowed_chat_ids: [-1001]\nunknown: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("telegram:\n  token: token\nunknown: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := config.Load(path); err == nil {

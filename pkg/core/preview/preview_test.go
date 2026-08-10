@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	testFacebookHost = "mbasic.facebook.com"
-	testHTTPS        = "https"
-	testPath         = "/somepage"
-	testContentType  = "text/html"
+	testHTTPS       = "https"
+	testPath        = "/somepage"
+	testContentType = "text/html"
+	testExampleHost = "example.com"
 )
 
 func TestGenericHTMLProviderExtractsOpenGraph(t *testing.T) {
@@ -34,121 +34,70 @@ func TestGenericHTMLProviderExtractsOpenGraph(t *testing.T) {
 	}
 }
 
-func TestFacebookProviderMatchesExactHosts(t *testing.T) {
+func TestBareSiteNameTitleNotUseful(t *testing.T) {
 	t.Parallel()
-	fb := &preview.FacebookProvider{}
-	exactHosts := []string{
-		"facebook.com",
-		"www.facebook.com",
-		"m.facebook.com",
-		"mbasic.facebook.com",
-		"fb.watch",
-		"fb.me",
+	registry, err := preview.NewRegistry(preview.GenericHTMLProvider{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, host := range exactHosts {
-		doc := preview.Document{URL: &url.URL{Scheme: testHTTPS, Host: host, Path: testPath}}
-		if !fb.Match(doc) {
-			t.Errorf("Match(%q) = false, want true", host)
-		}
-	}
-}
-
-func TestFacebookProviderRejectsLookalikes(t *testing.T) {
-	t.Parallel()
-	fb := &preview.FacebookProvider{}
-	lookalikes := []string{
-		"facebook.com.attacker.example",
-		"www.facebook.com.example.net",
-		"mfacebook.com",
-		"facebook.co",
-	}
-	for _, host := range lookalikes {
-		doc := preview.Document{URL: &url.URL{Scheme: testHTTPS, Host: host, Path: "/"}}
-		if fb.Match(doc) {
-			t.Errorf("Match(%q) = true, want false", host)
-		}
-	}
-}
-
-func TestFacebookProviderInconclusiveWhenNoUsefulMetadata(t *testing.T) {
-	t.Parallel()
-	fb := &preview.FacebookProvider{}
 	doc := preview.Document{
-		URL:         &url.URL{Scheme: testHTTPS, Host: testFacebookHost, Path: testPath},
+		URL:         &url.URL{Scheme: testHTTPS, Host: testExampleHost, Path: "/"},
 		ContentType: testContentType,
-		Body:        []byte(`<html><body>no metadata here</body></html>`),
+		Body:        []byte(`<title>Example</title>`),
 	}
-	metadata := fb.Extract(doc)
+	metadata, _ := registry.Inspect(doc)
 	if metadata.Useful() {
-		t.Fatal("metadata should not be useful for this document")
-	}
-	if !fb.Inconclusive() {
-		t.Error("Inconclusive() = false, want true when Extract returns no useful metadata")
+		t.Error("title=sitename with no description should not be useful")
 	}
 }
 
-func TestFacebookProviderNotInconclusiveWhenUsefulMetadata(t *testing.T) {
+func TestDistinctHTMLTitleIsUseful(t *testing.T) {
 	t.Parallel()
-	fb := &preview.FacebookProvider{}
-	doc := preview.Document{
-		URL:         &url.URL{Scheme: testHTTPS, Host: testFacebookHost, Path: testPath},
-		ContentType: testContentType,
-		Body:        []byte(`<meta property="og:title" content="A Title"><meta property="og:description" content="A Description">`),
+	registry, err := preview.NewRegistry(preview.GenericHTMLProvider{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	metadata := fb.Extract(doc)
+	doc := preview.Document{
+		URL:         &url.URL{Scheme: testHTTPS, Host: testExampleHost, Path: "/article"},
+		ContentType: testContentType,
+		Body:        []byte(`<title>Example Blog: Article Title</title>`),
+	}
+	metadata, _ := registry.Inspect(doc)
 	if !metadata.Useful() {
-		t.Fatal("metadata should be useful for this document")
-	}
-	if fb.Inconclusive() {
-		t.Error("Inconclusive() = true, want false when Extract returns useful metadata")
+		t.Error("distinct HTML title with no OG tags should be useful")
 	}
 }
 
-func TestRegistryFacebookBeforeGenericHTML(t *testing.T) {
+func TestBareSiteNameWithDescriptionIsUseful(t *testing.T) {
 	t.Parallel()
-	registry, err := preview.NewRegistry(&preview.FacebookProvider{}, preview.GenericHTMLProvider{})
+	registry, err := preview.NewRegistry(preview.GenericHTMLProvider{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := preview.Document{
-		URL:         &url.URL{Scheme: testHTTPS, Host: "facebook.com", Path: testPath},
+		URL:         &url.URL{Scheme: testHTTPS, Host: testExampleHost, Path: "/"},
 		ContentType: testContentType,
-		Body:        []byte(`<meta property="og:title" content="FB Title">`),
+		Body:        []byte(`<title>Example</title><meta name="description" content="A great website">`),
 	}
-	_, provider := registry.Inspect(doc)
-	if provider != "facebook" {
-		t.Errorf("provider = %q, want facebook (FacebookProvider should take priority over GenericHTMLProvider)", provider)
+	metadata, _ := registry.Inspect(doc)
+	if !metadata.Useful() {
+		t.Error("title=sitename with description should be useful")
 	}
 }
 
-func TestRegistryIsInconclusiveForFacebookWithNoMetadata(t *testing.T) {
+func TestBareSiteNameFacebookIsNotUseful(t *testing.T) {
 	t.Parallel()
-	registry, err := preview.NewRegistry(&preview.FacebookProvider{}, preview.GenericHTMLProvider{})
+	registry, err := preview.NewRegistry(preview.GenericHTMLProvider{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := preview.Document{
-		URL:         &url.URL{Scheme: testHTTPS, Host: testFacebookHost, Path: testPath},
+		URL:         &url.URL{Scheme: testHTTPS, Host: "mbasic.facebook.com", Path: "/share/18uiPcLZw1"},
 		ContentType: testContentType,
-		Body:        []byte(`<html><body>nothing useful</body></html>`),
+		Body:        []byte(`<title>Facebook</title>`),
 	}
-	if !registry.IsInconclusive(doc) {
-		t.Error("IsInconclusive() = false, want true for Facebook URL with no useful metadata")
-	}
-}
-
-func TestRegistryIsNotInconclusiveForFacebookWithUsefulMetadata(t *testing.T) {
-	t.Parallel()
-	registry, err := preview.NewRegistry(&preview.FacebookProvider{}, preview.GenericHTMLProvider{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	doc := preview.Document{
-		URL:         &url.URL{Scheme: testHTTPS, Host: testFacebookHost, Path: testPath},
-		ContentType: testContentType,
-		Body:        []byte(`<meta property="og:title" content="Real Title"><meta property="og:description" content="Real Description">`),
-	}
-	if registry.IsInconclusive(doc) {
-		t.Error("IsInconclusive() = true, want false for Facebook URL with useful metadata")
+	metadata, _ := registry.Inspect(doc)
+	if metadata.Useful() {
+		t.Error("Facebook login wall title should not be useful")
 	}
 }

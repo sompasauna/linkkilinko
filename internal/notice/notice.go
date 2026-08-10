@@ -22,6 +22,13 @@ var catalogFS embed.FS
 
 const catalogDirectory = "catalog"
 
+const (
+	placeholderSender   = "sender"
+	placeholderContent  = "content"
+	placeholderURL      = "url"
+	placeholderMetadata = "metadata"
+)
+
 // Catalog holds the validated messages for one language.
 type Catalog struct {
 	language string
@@ -132,9 +139,9 @@ func validate(language string, messages map[string]string) error {
 	}
 	allowed := map[string]map[string]struct{}{
 		moderation.NoticeNewcomerSandbox: {},
-		moderation.NoticeGoogleWrapper:   {"sender": {}, "content": {}},
-		moderation.NoticePreviewMissing:  {},
-		moderation.NoticePreviewEnriched: {"sender": {}, "url": {}, "metadata": {}},
+		moderation.NoticeGoogleWrapper:   {placeholderSender: {}, placeholderContent: {}},
+		moderation.NoticePreviewMissing:  {placeholderSender: {}},
+		moderation.NoticePreviewEnriched: {placeholderSender: {}, placeholderURL: {}, placeholderMetadata: {}},
 	}
 	placeholderPattern := regexp.MustCompile(`\{([a-z]+)\}`)
 	for key, message := range messages {

@@ -96,6 +96,18 @@ An HTTP or HTTPS URL found in a Telegram `url` or `text_link` entity in message
 text or a media caption. Entity-aware extraction is authoritative; raw regular
 expressions are not the main parser.
 
+A `url` entity's visible text is recognized even without an explicit `http://`
+or `https://` prefix, matching Telegram clients' own link detection for text
+such as `github.com/owner/repository`. The unmodified visible text remains
+what the bot displays and replaces; `https://` is prefixed only to build the
+canonical target used for resolution, metadata retrieval, policy checks, and
+fingerprinting, so a scheme-less spelling and its explicit HTTPS spelling are
+treated as the same link throughout. An explicit non-HTTP scheme, such as
+`ftp://` or a Telegram deep link, is rejected outright and is never
+reinterpreted as HTTPS. This recognition does not extend to `text_link`
+entities, whose `url` field is always an explicit destination set by the
+sender.
+
 ### Link-only message
 
 A text message whose content, after removing all URL entity spans, contains only
@@ -147,7 +159,6 @@ secret injection; the token must never be committed.
 ```yaml
 telegram:
   token: ""
-  allowed_chat_ids: [-1001234567890]
 
 database:
   path: "/var/lib/linkkilinko/linkkilinko.sqlite"
@@ -169,11 +180,10 @@ metadata:
 Required validation:
 
 1. The token is non-empty after secret resolution.
-2. At least one allowed chat id is configured. The bot ignores every other chat.
-3. The newcomer duration is positive and defaults to exactly 48 hours.
-4. Network limits are positive and remain within compiled safety ceilings.
-5. The database directory exists and is writable, or can be created safely.
-6. `notice_language` is non-empty and selects a compiled-in message catalog that
+2. The newcomer duration is positive and defaults to exactly 48 hours.
+3. Network limits are positive and remain within compiled safety ceilings.
+4. The database directory exists and is writable, or can be created safely.
+5. `notice_language` is non-empty and selects a compiled-in message catalog that
    defines every notice key policy can emit. Startup fails otherwise.
 
 If `notice_catalog` is configured, it is a YAML overlay keyed by notice key.
@@ -196,7 +206,8 @@ The stages are ordered and short-circuit as follows.
 
 ### 1. Scope And Update Idempotency
 
-1. Ignore chats not present in `allowed_chat_ids`.
+1. Ignore chats that have not been approved by the owner through the bootstrap
+   flow.
 2. Ignore bot-authored messages, service messages, and messages with no stable
    positive message id.
 3. Claim `(chat_id, message_id, edit_date)` in persistent idempotency storage.

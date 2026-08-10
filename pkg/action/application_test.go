@@ -22,6 +22,9 @@ const (
 	testEntityType  = "url"
 	testContentType = "text/html"
 	testShareRule   = "google-share"
+
+	outboxStateSendPending = "send_pending"
+	outboxStateDead        = "dead"
 )
 
 type fakeTelegram struct {
@@ -70,17 +73,17 @@ func (f fakeNotice) Render(key string, _ map[string]string) string {
 
 type fakeMetadata struct {
 	docs map[string]preview.Document
+	err  error
 }
 
 func (f *fakeMetadata) Fetch(_ context.Context, rawURL string) (preview.Document, error) {
+	if f.err != nil {
+		return preview.Document{}, f.err
+	}
 	if doc, ok := f.docs[rawURL]; ok {
 		return doc, nil
 	}
 	return preview.Document{}, errors.New("not found")
-}
-
-func (f *fakeMetadata) FetchWithUserAgent(_ context.Context, rawURL, _ string) (preview.Document, error) {
-	return f.Fetch(context.Background(), rawURL)
 }
 
 // fakeLinks matches nothing by default; tests that exercise the wrapper path
@@ -126,8 +129,6 @@ func (f *fakePreviews) Inspect(preview.Document) (preview.Metadata, string) {
 	return f.inspectResult, "test"
 }
 
-func (f *fakePreviews) IsInconclusive(preview.Document) bool { return false }
-
 type fakeStore struct {
 	memberships     map[membershipKey]store.Membership
 	grandfathered   map[membershipKey]bool
@@ -136,6 +137,20 @@ type fakeStore struct {
 	deleteRequested []int64
 	sendPending     []int64
 	outboxComplete  []struct{ actionID, messageID int64 }
+	outbox          map[int64]outboxEntry
+}
+
+type outboxEntry struct {
+	state             string
+	attempts          int
+	nextAttemptAt     time.Time
+	leaseUntil        time.Time
+	responseMessageID int
+	payload           string
+	canonicalActionID int64
+	chatID            int64
+	threadID          int
+	sourceMessageID   int
 }
 
 type membershipKey struct {
@@ -148,6 +163,7 @@ func newFakeStore() *fakeStore {
 		memberships:   make(map[membershipKey]store.Membership),
 		grandfathered: make(map[membershipKey]bool),
 		canonicalActs: make(map[canonicalKey]store.CanonicalAction),
+		outbox:        make(map[int64]outboxEntry),
 	}
 }
 
@@ -183,35 +199,122 @@ func (f *fakeStore) CreateCanonical(_ context.Context, a store.CanonicalAction) 
 	f.nextID++
 	a.ID = f.nextID
 	f.canonicalActs[key] = a
+	f.outbox[a.ID] = outboxEntry{
+		state:             "planned",
+		payload:           a.Payload,
+		canonicalActionID: a.ID,
+		chatID:            a.ChatID,
+		threadID:          a.ThreadID,
+		sourceMessageID:   a.SourceMessageID,
+		leaseUntil:        time.Now().Add(time.Minute),
+	}
 	return a, true, nil
 }
 
 func (f *fakeStore) RecordSuppressed(_ context.Context, _ int64, _ int) error { return nil }
 func (f *fakeStore) MarkDeleteRequested(_ context.Context, actionID int64) error {
 	f.deleteRequested = append(f.deleteRequested, actionID)
+	e := f.outbox[actionID]
+	e.state = "delete_requested"
+	e.leaseUntil = time.Now().Add(time.Minute)
+	e.canonicalActionID = actionID
+	f.outbox[actionID] = e
 	return nil
 }
 
 func (f *fakeStore) MarkSendPending(_ context.Context, actionID int64) error {
 	f.sendPending = append(f.sendPending, actionID)
-	return nil
-}
-func (f *fakeStore) MarkOutboxCopied(_ context.Context, _ int64, _ int) error { return nil }
-func (f *fakeStore) MarkOutboxComplete(_ context.Context, actionID int64, responseMessageID int) error {
-	f.outboxComplete = append(f.outboxComplete, struct{ actionID, messageID int64 }{actionID, int64(responseMessageID)})
+	e := f.outbox[actionID]
+	e.state = outboxStateSendPending
+	e.leaseUntil = time.Now().Add(time.Minute)
+	f.outbox[actionID] = e
 	return nil
 }
 
-func (f *fakeStore) PendingOutbox(_ context.Context, _ time.Time) ([]store.OutboxEntry, error) {
-	return nil, nil
-}
-func (f *fakeStore) ReleaseOutboxLease(_ context.Context, _ int64) error                 { return nil }
-func (f *fakeStore) ReplaceOutboxPayload(_ context.Context, _ int64, _ string) error     { return nil }
-func (f *fakeStore) MarkOutboxError(_ context.Context, _ int64, _ string, _ error) error { return nil }
-func (f *fakeStore) MarkOutboxErrorAfter(_ context.Context, _ int64, _ string, _ error, _ time.Duration) error {
+func (f *fakeStore) MarkOutboxCopied(_ context.Context, actionID int64, responseMessageID int) error {
+	e := f.outbox[actionID]
+	e.responseMessageID = responseMessageID
+	f.outbox[actionID] = e
 	return nil
 }
-func (f *fakeStore) MarkOutboxDead(_ context.Context, _ int64, _ error) error { return nil }
+
+func (f *fakeStore) MarkOutboxComplete(_ context.Context, actionID int64, responseMessageID int) error {
+	f.outboxComplete = append(f.outboxComplete, struct{ actionID, messageID int64 }{actionID, int64(responseMessageID)})
+	e := f.outbox[actionID]
+	e.state = "complete"
+	e.responseMessageID = responseMessageID
+	e.leaseUntil = time.Time{}
+	f.outbox[actionID] = e
+	return nil
+}
+
+func (f *fakeStore) PendingOutbox(_ context.Context, now time.Time) ([]store.OutboxEntry, error) {
+	var entries []store.OutboxEntry
+	for id, e := range f.outbox {
+		if e.state == "complete" || e.state == outboxStateDead {
+			continue
+		}
+		if e.leaseUntil.After(now) {
+			continue
+		}
+		entries = append(entries, store.OutboxEntry{
+			ID:                id,
+			CanonicalActionID: e.canonicalActionID,
+			ChatID:            e.chatID,
+			ThreadID:          e.threadID,
+			SourceMessageID:   e.sourceMessageID,
+			Payload:           e.payload,
+			State:             e.state,
+			Attempts:          e.attempts,
+			NextAttemptAt:     e.nextAttemptAt,
+			ResponseMessageID: e.responseMessageID,
+			LeaseUntil:        e.leaseUntil,
+		})
+	}
+	return entries, nil
+}
+
+func (f *fakeStore) ReleaseOutboxLease(_ context.Context, actionID int64) error {
+	e := f.outbox[actionID]
+	e.leaseUntil = time.Time{}
+	f.outbox[actionID] = e
+	return nil
+}
+
+func (f *fakeStore) ReplaceOutboxPayload(_ context.Context, actionID int64, payload string) error {
+	e := f.outbox[actionID]
+	e.payload = payload
+	f.outbox[actionID] = e
+	return nil
+}
+
+func (f *fakeStore) MarkOutboxError(_ context.Context, actionID int64, state string, _ error) error {
+	e := f.outbox[actionID]
+	e.attempts++
+	e.state = state
+	e.nextAttemptAt = time.Now()
+	e.leaseUntil = time.Time{}
+	f.outbox[actionID] = e
+	return nil
+}
+
+func (f *fakeStore) MarkOutboxErrorAfter(_ context.Context, actionID int64, state string, _ error, delay time.Duration) error {
+	e := f.outbox[actionID]
+	e.attempts++
+	e.state = state
+	e.nextAttemptAt = time.Now().Add(delay)
+	e.leaseUntil = time.Now().Add(delay).Add(time.Minute)
+	f.outbox[actionID] = e
+	return nil
+}
+
+func (f *fakeStore) MarkOutboxDead(_ context.Context, actionID int64, _ error) error {
+	e := f.outbox[actionID]
+	e.state = outboxStateDead
+	e.leaseUntil = time.Time{}
+	f.outbox[actionID] = e
+	return nil
+}
 
 // canonicalKey mirrors the real store's
 // UNIQUE(chat_id, thread_id, user_id, rule, behavior_version, fingerprint).
@@ -245,12 +348,11 @@ func newTestAppWithLinks(tc *fakeTelegram, st *fakeStore, md *fakeMetadata, pv *
 	cfg := config.Config{
 		Moderation: config.ModerationConfig{NewcomerSandbox: config.Duration(48 * time.Hour)},
 		Metadata: config.MetadataConfig{
-			RequestTimeout:    config.Duration(5 * time.Second),
-			TotalTimeout:      config.Duration(10 * time.Second),
-			MaxHTMLBytes:      2 << 20,
-			MaxRedirects:      5,
-			UserAgent:         "test",
-			FacebookUserAgent: "test-fb",
+			RequestTimeout: config.Duration(5 * time.Second),
+			TotalTimeout:   config.Duration(10 * time.Second),
+			MaxHTMLBytes:   2 << 20,
+			MaxRedirects:   5,
+			UserAgent:      "test",
 		},
 	}
 	return action.New(cfg, tc, st, md, links, pv, fakeNotice{}, time.Now)
@@ -321,6 +423,54 @@ func TestEstablishedUserLinkOnlyWithMetadataKept(t *testing.T) {
 	_ = app.Process(context.Background(), input)
 	if len(tc.deleteCalled) > 0 {
 		t.Error("message with useful metadata should not be deleted")
+	}
+}
+
+// TestNewcomerCannotBypassSandboxWithSchemelessURL is t-019 regression
+// coverage item 6: a scheme-less url entity (recognized by Telegram without
+// an http/https prefix) must trip the newcomer sandbox exactly like its
+// explicit-scheme spelling, and must not reach the resolver or fetcher.
+func TestNewcomerCannotBypassSandboxWithSchemelessURL(t *testing.T) {
+	t.Parallel()
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	app := newTestApp(tc, st, md, pv)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-1 * time.Hour)}
+	schemeless := "example.com/path"
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     schemeless,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(schemeless)}},
+	}
+	_ = app.Process(context.Background(), input)
+	if len(tc.deleteCalled) == 0 {
+		t.Error("newcomer posting a scheme-less link should still be sandboxed")
+	}
+	if len(md.docs) > 0 {
+		t.Error("metadata fetched for newcomer; scheme-less URL should still short-circuit the fetcher")
+	}
+}
+
+// TestEstablishedSchemelessLinkOnlyReachesMetadataAndPreviewPolicy is t-019
+// regression coverage item 7: an established sender's link-only post using a
+// scheme-less url entity must reach the metadata and preview policy stage,
+// keyed by its canonical https target, the same as an explicit spelling.
+func TestEstablishedSchemelessLinkOnlyReachesMetadataAndPreviewPolicy(t *testing.T) {
+	t.Parallel()
+	schemeless := "example.com/path"
+	canonical := "https://" + schemeless
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
+		docs: map[string]preview.Document{canonical: {URL: &url.URL{Host: testURLHost}, Body: []byte("<html></html>"), ContentType: testContentType}},
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Example Page"}}
+	app := newTestApp(tc, st, md, pv)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     schemeless,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(schemeless)}},
+	}
+	_ = app.Process(context.Background(), input)
+	if len(tc.deleteCalled) > 0 {
+		t.Error("scheme-less link-only post with useful metadata should not be deleted")
 	}
 }
 
@@ -480,6 +630,42 @@ func TestAMPUsesItsOwnRuleName(t *testing.T) {
 	}
 }
 
+// MixedURLsUseLowestIndexRule ensures that when a message contains multiple
+// tracked URL types, the rule is derived from the first matching URL in message
+// order rather than map iteration order.
+func TestMixedURLsUseLowestIndexRule(t *testing.T) {
+	t.Parallel()
+	const (
+		shareURL    = "https://share.google/abc"
+		ampURL      = "https://www.google.com/amp/s/news.example/article"
+		shareTarget = "https://example.com/article"
+		ampTarget   = "https://news.example/article"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	links := &fakeLinks{destinations: map[string]string{shareURL: shareTarget, ampURL: ampTarget}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text: shareURL + " " + ampURL,
+		Entities: []moderation.Entity{
+			{Type: testEntityType, Offset: 0, Length: len(shareURL), URL: shareURL},
+			{Type: testEntityType, Offset: len(shareURL) + 1, Length: len(ampURL), URL: ampURL},
+		},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(st.canonicalActs) != 1 {
+		t.Fatalf("canonical actions = %d, want 1", len(st.canonicalActs))
+	}
+	for _, act := range st.canonicalActs {
+		if act.Rule != "google-share" {
+			t.Errorf("rule = %q, want google-share (from first URL)", act.Rule)
+		}
+	}
+}
+
 func TestMarkupInjectionResistance(t *testing.T) {
 	t.Parallel()
 	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
@@ -512,4 +698,149 @@ func containsAt(s, substr string, start int) bool {
 		}
 	}
 	return false
+}
+
+func TestTrackedLinkRewritingBeforePreviewPolicy(t *testing.T) {
+	t.Parallel()
+	const (
+		wrapper = "https://share.google/abc"
+		target  = "https://example.com/no-metadata"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	links := &fakeLinks{destinations: map[string]string{wrapper: target}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     wrapper,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(wrapper), URL: wrapper}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.deleteCalled) == 0 {
+		t.Fatal("wrapper link should be replaced, requiring original deletion")
+	}
+	if len(md.docs) > 0 {
+		t.Error("metadata should not be fetched for wrapper URL; rewriting happens first")
+	}
+}
+
+func TestSendFailureAfterSuccessfulDelete(t *testing.T) {
+	t.Parallel()
+	tc := &fakeTelegram{}
+	sendErr := errors.New("rate limit")
+	tc.deleteHook = func(_ int64, _ int) error { return nil }
+	tc.sendHook = func(_ int64, _ int, _ string) (int, error) { return 0, sendErr }
+	st, md, pv := newFakeStore(), &fakeMetadata{
+		docs: map[string]preview.Document{testURL: {URL: &url.URL{Host: testURLHost}, Body: []byte("<html><title>Title</title></html>"), ContentType: testContentType}},
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Title"}}
+	app := newTestApp(tc, st, md, pv)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100, PreviewDisabled: true,
+		Text:     testURL,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(testURL), URL: testURL}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.deleteCalled) == 0 {
+		t.Fatal("delete should have been called")
+	}
+	if len(st.sendPending) == 0 {
+		t.Fatal("send should have been marked pending")
+	}
+	entries, err := st.PendingOutbox(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("pending outbox: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("outbox should retain the failed item for retry")
+	}
+	if entries[0].State != outboxStateSendPending {
+		t.Errorf("state = %q, want send_pending", entries[0].State)
+	}
+}
+
+func TestDeadLetterAfterRepeatedFailures(t *testing.T) {
+	t.Parallel()
+	st := newFakeStore()
+	st.outbox[1] = outboxEntry{
+		state:             outboxStateSendPending,
+		attempts:          2,
+		nextAttemptAt:     time.Now().Add(-time.Hour),
+		leaseUntil:        time.Now().Add(-time.Hour),
+		responseMessageID: 0,
+		payload:           `{"text":"test","operation":"text"}`,
+		canonicalActionID: 1,
+		chatID:            1,
+		threadID:          0,
+		sourceMessageID:   10,
+	}
+	if err := st.MarkOutboxDead(context.Background(), 1, errors.New("permanent failure")); err != nil {
+		t.Fatalf("mark outbox dead: %v", err)
+	}
+	e := st.outbox[1]
+	if e.state != outboxStateDead {
+		t.Errorf("state = %q, want dead", e.state)
+	}
+	if !e.leaseUntil.IsZero() {
+		t.Error("lease should be released after dead letter")
+	}
+	entries, err := st.PendingOutbox(context.Background(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("pending outbox: %v", err)
+	}
+	for _, e := range entries {
+		if e.CanonicalActionID == 1 {
+			t.Error("dead entry should not be returned by pending outbox")
+		}
+	}
+}
+
+func TestRestartRecoveryAtEachDurableState(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	testCases := []struct {
+		name  string
+		state string
+		lease time.Time
+	}{
+		{name: "pending_planned", state: "planned", lease: now.Add(-time.Hour)},
+		{name: "pending_send_pending", state: outboxStateSendPending, lease: now.Add(-time.Hour)},
+		{name: "pending_lease_expired", state: outboxStateSendPending, lease: now.Add(-time.Hour)},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := newFakeStore()
+			st.outbox[1] = outboxEntry{
+				state:             tc.state,
+				attempts:          0,
+				nextAttemptAt:     now.Add(-time.Hour),
+				leaseUntil:        tc.lease,
+				responseMessageID: 0,
+				payload:           `{"text":"test","operation":"text"}`,
+				canonicalActionID: 1,
+				chatID:            1,
+				threadID:          0,
+				sourceMessageID:   10,
+			}
+			entries, err := st.PendingOutbox(context.Background(), now)
+			if err != nil {
+				t.Fatalf("pending outbox: %v", err)
+			}
+			found := false
+			for _, e := range entries {
+				if e.CanonicalActionID == 1 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("state=%q lease=%v should be recovered after restart", tc.state, tc.lease)
+			}
+		})
+	}
 }

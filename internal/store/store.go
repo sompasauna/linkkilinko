@@ -3,7 +3,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +15,10 @@ import (
 
 	_ "modernc.org/sqlite" // register the SQLite database/sql driver
 )
+
+// outboxLeaseDuration bounds how long a claimed outbox entry is hidden from
+// other callers before it is treated as abandoned and reclaimable.
+const outboxLeaseDuration = time.Minute
 
 // Membership is the latest observed status for a chat member.
 type Membership struct {
@@ -116,6 +122,16 @@ func (s *Store) ApprovedChat(ctx context.Context, chatID int64) (bool, error) {
 		return false, fmt.Errorf("store: check approved chat: %w", err)
 	}
 	return exists == 1, nil
+}
+
+// ApprovedChatCount returns the number of durably approved groups.
+func (s *Store) ApprovedChatCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM approved_chats`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count approved chats: %w", err)
+	}
+	return count, nil
 }
 
 // Open opens a SQLite database and applies the current schema transactionally.
@@ -388,18 +404,27 @@ func (s *Store) MarkOutboxCopied(ctx context.Context, actionID int64, responseMe
 }
 
 func (s *Store) updateOutbox(ctx context.Context, actionID int64, state string, errText string) error {
-	var attempts int
-	if err := s.db.QueryRowContext(ctx, `SELECT attempts FROM moderation_outbox WHERE canonical_action_id = ?`, actionID).Scan(&attempts); err != nil {
-		return fmt.Errorf("store: read outbox attempts: %w", err)
+	backoff, err := s.outboxBackoff(ctx, actionID)
+	if err != nil {
+		return err
 	}
-	backoff := time.Second << min(attempts, 10)
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE moderation_outbox SET state = ?, attempts = attempts + 1, last_error = ?, next_attempt_at = ?
 		WHERE canonical_action_id = ?`, state, errText, time.Now().Add(backoff).Unix(), actionID)
 	if err != nil {
 		return fmt.Errorf("store: update outbox: %w", err)
 	}
 	return nil
+}
+
+// outboxBackoff computes the next exponential backoff from the action's
+// current attempt count.
+func (s *Store) outboxBackoff(ctx context.Context, actionID int64) (time.Duration, error) {
+	var attempts int
+	if err := s.db.QueryRowContext(ctx, `SELECT attempts FROM moderation_outbox WHERE canonical_action_id = ?`, actionID).Scan(&attempts); err != nil {
+		return 0, fmt.Errorf("store: read outbox attempts: %w", err)
+	}
+	return time.Second << min(attempts, 10), nil
 }
 
 // MarkDeleteRequested records that deletion has started.
@@ -416,22 +441,29 @@ func (s *Store) MarkSendPending(ctx context.Context, actionID int64) error {
 	return nil
 }
 
-// PendingOutbox returns due actions that need Telegram side effects.
+// PendingOutbox returns due actions that need Telegram side effects. The
+// claim uses a freshly generated random token rather than a value derived
+// from now: two callers racing within the same wall-clock second must not
+// compute the same claim value and both see the rows the other just took.
 func (s *Store) PendingOutbox(ctx context.Context, now time.Time) ([]OutboxEntry, error) {
+	token, err := newLeaseToken()
+	if err != nil {
+		return nil, fmt.Errorf("store: generate lease token: %w", err)
+	}
 	transaction, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim outbox: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
-	leaseUntil := now.Add(time.Minute).Unix()
+	leaseUntil := now.Add(outboxLeaseDuration).Unix()
 	if _, err := transaction.ExecContext(ctx, `
-		UPDATE moderation_outbox SET lease_until = ?
-		WHERE state NOT IN ('complete', 'dead') AND next_attempt_at <= ? AND lease_until <= ?`, leaseUntil, now.Unix(), now.Unix()); err != nil {
+		UPDATE moderation_outbox SET lease_until = ?, lease_token = ?
+		WHERE state NOT IN ('complete', 'dead') AND next_attempt_at <= ? AND lease_until <= ?`, leaseUntil, token, now.Unix(), now.Unix()); err != nil {
 		return nil, fmt.Errorf("store: claim outbox: %w", err)
 	}
 	rows, err := transaction.QueryContext(ctx, `
 		SELECT id, canonical_action_id, chat_id, thread_id, source_message_id, payload, state, attempts, next_attempt_at, response_message_id, lease_until
-		FROM moderation_outbox WHERE lease_until = ? AND state NOT IN ('complete', 'dead') ORDER BY id`, leaseUntil)
+		FROM moderation_outbox WHERE lease_token = ? AND state NOT IN ('complete', 'dead') ORDER BY id`, token)
 	if err != nil {
 		return nil, fmt.Errorf("store: list claimed outbox: %w", err)
 	}
@@ -459,11 +491,23 @@ func (s *Store) PendingOutbox(ctx context.Context, now time.Time) ([]OutboxEntry
 
 // ReleaseOutboxLease makes an unfinished action eligible for another worker.
 func (s *Store) ReleaseOutboxLease(ctx context.Context, actionID int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE moderation_outbox SET lease_until = 0 WHERE canonical_action_id = ?`, actionID)
+	_, err := s.db.ExecContext(ctx, `UPDATE moderation_outbox SET lease_until = 0, lease_token = '' WHERE canonical_action_id = ?`, actionID)
 	if err != nil {
 		return fmt.Errorf("store: release outbox lease: %w", err)
 	}
 	return nil
+}
+
+// newLeaseToken returns a random claim token. It must never be derived from
+// the current time: a value derived from now lets two callers racing within
+// the same wall-clock second compute an identical token and both observe the
+// rows the other just claimed.
+func newLeaseToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("store: read random lease token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // MarkOutboxComplete records a successful response and closes the canonical action.
@@ -495,6 +539,9 @@ func (s *Store) MarkOutboxErrorAfter(ctx context.Context, actionID int64, state 
 	return s.markOutboxError(ctx, actionID, state, operationErr, delay)
 }
 
+// markOutboxError leaves an action retryable at next_attempt_at and releases
+// its lease in the same statement as the state write, so a retry due sooner
+// than the lease's natural expiry is not blocked behind a stale claim.
 func (s *Store) markOutboxError(ctx context.Context, actionID int64, state string, operationErr error, delay time.Duration) error {
 	message := ""
 	if operationErr != nil {
@@ -504,10 +551,14 @@ func (s *Store) markOutboxError(ctx context.Context, actionID int64, state strin
 		}
 	}
 	if delay <= 0 {
-		return s.updateOutbox(ctx, actionID, state, message)
+		backoff, err := s.outboxBackoff(ctx, actionID)
+		if err != nil {
+			return err
+		}
+		delay = backoff
 	}
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE moderation_outbox SET state = ?, attempts = attempts + 1, last_error = ?, next_attempt_at = ?
+		UPDATE moderation_outbox SET state = ?, attempts = attempts + 1, last_error = ?, next_attempt_at = ?, lease_until = 0, lease_token = ''
 		WHERE canonical_action_id = ?`, state, message, time.Now().Add(delay).Unix(), actionID)
 	if err != nil {
 		return fmt.Errorf("store: update delayed outbox: %w", err)
@@ -631,6 +682,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			last_error TEXT NOT NULL DEFAULT '',
 			response_message_id INTEGER NOT NULL DEFAULT 0,
 			lease_until INTEGER NOT NULL DEFAULT 0,
+			lease_token TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
 			FOREIGN KEY(canonical_action_id) REFERENCES canonical_actions(id)
 		)`,
@@ -650,6 +702,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, statement := range []string{
 		`ALTER TABLE processed_updates ADD COLUMN decision TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE moderation_outbox ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE moderation_outbox ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := transaction.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("store: migrate added columns: %w", err)

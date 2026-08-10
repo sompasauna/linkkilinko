@@ -39,8 +39,7 @@ type OperationalConfig struct {
 
 // TelegramConfig configures the Telegram Bot API connection and chat scope.
 type TelegramConfig struct {
-	Token          string  `yaml:"token"`
-	AllowedChatIDs []int64 `yaml:"allowed_chat_ids"`
+	Token string `yaml:"token"`
 }
 
 // DatabaseConfig configures durable state.
@@ -57,12 +56,11 @@ type ModerationConfig struct {
 
 // MetadataConfig configures safe HTTP retrieval.
 type MetadataConfig struct {
-	RequestTimeout    Duration `yaml:"request_timeout"`
-	TotalTimeout      Duration `yaml:"total_timeout"`
-	MaxRedirects      int      `yaml:"max_redirects"`
-	MaxHTMLBytes      int64    `yaml:"max_html_bytes"`
-	UserAgent         string   `yaml:"user_agent"`
-	FacebookUserAgent string   `yaml:"facebook_user_agent"`
+	RequestTimeout Duration `yaml:"request_timeout"`
+	TotalTimeout   Duration `yaml:"total_timeout"`
+	MaxRedirects   int      `yaml:"max_redirects"`
+	MaxHTMLBytes   int64    `yaml:"max_html_bytes"`
+	UserAgent      string   `yaml:"user_agent"`
 }
 
 // Defaults returns the initial operational defaults.
@@ -70,12 +68,11 @@ func Defaults() Config {
 	return Config{
 		Moderation: ModerationConfig{NewcomerSandbox: Duration(48 * time.Hour), NoticeLanguage: "fi"},
 		Metadata: MetadataConfig{
-			RequestTimeout:    Duration(5 * time.Second),
-			TotalTimeout:      Duration(10 * time.Second),
-			MaxRedirects:      5,
-			MaxHTMLBytes:      2 << 20,
-			UserAgent:         "linkkilinko/0.1",
-			FacebookUserAgent: "linkkilinko-facebook/0.1",
+			RequestTimeout: Duration(5 * time.Second),
+			TotalTimeout:   Duration(10 * time.Second),
+			MaxRedirects:   5,
+			MaxHTMLBytes:   2 << 20,
+			UserAgent:      "linkkilinko/0.1",
 		},
 	}
 }
@@ -106,9 +103,6 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Telegram.Token) == "" {
 		return errors.New("config: telegram token is empty")
 	}
-	if len(c.Telegram.AllowedChatIDs) == 0 {
-		return errors.New("config: allowed_chat_ids must not be empty")
-	}
 	if strings.TrimSpace(c.Database.Path) == "" {
 		return errors.New("config: database path is empty")
 	}
@@ -135,9 +129,6 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Metadata.UserAgent) == "" {
 		return errors.New("config: user_agent is empty")
-	}
-	if strings.TrimSpace(c.Metadata.FacebookUserAgent) == "" {
-		return errors.New("config: facebook_user_agent is empty")
 	}
 	return nil
 }

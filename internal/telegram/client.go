@@ -97,23 +97,31 @@ func (c *Client) Run(ctx context.Context, handler func(context.Context, telego.U
 			continue
 		}
 		backoff = time.Second
-		for update := range updates {
-			chatID, messageID := extractUpdateIdentity(update)
-			func() {
-				defer func() {
-					if recovered := recover(); recovered != nil {
-						slog.Error("telegram update handler panicked", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "panic", recovered)
-					}
-				}()
-				if err := handler(ctx, update); err != nil {
-					slog.Error("telegram update handler failed; continuing", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "error", err)
-				}
-			}()
-		}
+		c.processUpdates(ctx, updates, handler)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		slog.Warn("telegram update stream closed; reconnecting", "subsystem", "telegram")
+	}
+}
+
+// processUpdates drains the supplied update channel, dispatching each update
+// to handler with a recover on the per-update boundary. Handler errors and
+// panics are logged with update identity and the loop continues; only ctx
+// cancellation stops it.
+func (c *Client) processUpdates(ctx context.Context, updates <-chan telego.Update, handler func(context.Context, telego.Update) error) {
+	for update := range updates {
+		chatID, messageID := extractUpdateIdentity(update)
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					slog.Error("telegram update handler panicked", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "panic", recovered)
+				}
+			}()
+			if err := handler(ctx, update); err != nil {
+				slog.Error("telegram update handler failed; continuing", "subsystem", "telegram", "update_id", update.UpdateID, "chat_id", chatID, "message_id", messageID, "error", err)
+			}
+		}()
 	}
 }
 

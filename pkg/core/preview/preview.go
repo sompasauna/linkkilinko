@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"slices"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -20,15 +19,56 @@ type Document struct {
 
 // Metadata is the user-visible subset of page metadata.
 type Metadata struct {
-	CanonicalURL string
-	SiteName     string
-	Title        string
-	Description  string
+	CanonicalURL  string
+	SiteName      string
+	Title         string
+	Description   string
+	TitleFallback bool
+	Host          string
 }
 
 // Useful reports whether metadata is sufficient for a human-readable preview.
+// An HTML-<title>-only title is considered useful only when accompanied by a
+// description, or when it differs meaningfully from the site name or host.
 func (m Metadata) Useful() bool {
-	return strings.TrimSpace(m.Title) != "" || (strings.TrimSpace(m.SiteName) != "" && strings.TrimSpace(m.Description) != "")
+	title := strings.TrimSpace(m.Title)
+	if title == "" {
+		return false
+	}
+	if !m.TitleFallback || strings.TrimSpace(m.Description) != "" {
+		return true
+	}
+	siteName := strings.TrimSpace(m.SiteName)
+	if siteName != "" && strings.EqualFold(title, siteName) {
+		return false
+	}
+	host := strings.TrimSpace(m.Host)
+	if host != "" && isBareSiteName(title, host) {
+		return false
+	}
+	return true
+}
+
+func isBareSiteName(title, host string) bool {
+	titleLower := strings.ToLower(title)
+	hostLower := strings.ToLower(host)
+	if strings.EqualFold(titleLower, hostLower) {
+		return true
+	}
+	if strings.HasPrefix(hostLower, titleLower+".") {
+		return true
+	}
+	labels := strings.Split(hostLower, ".")
+	if len(labels) >= 2 {
+		siteDomain := strings.Join(labels[len(labels)-2:], ".")
+		if strings.EqualFold(titleLower, siteDomain) {
+			return true
+		}
+		if titleLower == labels[len(labels)-2] {
+			return true
+		}
+	}
+	return false
 }
 
 // Provider extracts metadata from a bounded document.
@@ -37,10 +77,6 @@ type Provider interface {
 	Match(document Document) bool
 	Extract(document Document) Metadata
 }
-
-// InconclusiveProvider marks a provider result that must not be treated as a
-// definitive absence of metadata.
-type InconclusiveProvider interface{ Inconclusive() bool }
 
 // Registry dispatches documents to metadata providers.
 type Registry struct {
@@ -76,67 +112,6 @@ func (r Registry) Inspect(document Document) (Metadata, string) {
 	return Metadata{}, ""
 }
 
-// IsInconclusive reports whether the selected provider could not safely decide.
-// For InconclusiveProvider, this calls Extract to determine the actual state.
-func (r Registry) IsInconclusive(document Document) bool {
-	for _, provider := range r.providers {
-		if provider.Match(document) {
-			if inconclusive, ok := provider.(InconclusiveProvider); ok {
-				if ip, ok := provider.(interface {
-					Extract(document Document) Metadata
-				}); ok {
-					metadata := ip.Extract(document)
-					return inconclusive.Inconclusive() || !metadata.Useful()
-				}
-				return inconclusive.Inconclusive()
-			}
-			return false
-		}
-	}
-	return false
-}
-
-// FacebookProvider extracts metadata from Facebook-family documents. The
-// caller supplies the document fetched through the mobile-host policy.
-type FacebookProvider struct {
-	inconclusive bool
-}
-
-var facebookHosts = []string{
-	"facebook.com",
-	"www.facebook.com",
-	"m.facebook.com",
-	"mbasic.facebook.com",
-	"fb.watch",
-	"fb.me",
-}
-
-// Name returns the stable provider name.
-func (p *FacebookProvider) Name() string { return "facebook" }
-
-// Match reports whether document is hosted by the Facebook host family, using
-// exact-host comparison so lookalikes such as facebook.com.example never match.
-func (p *FacebookProvider) Match(document Document) bool {
-	if document.URL == nil {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSuffix(document.URL.Hostname(), "."))
-	return slices.Contains(facebookHosts, host)
-}
-
-// Extract reads the Open Graph and HTML fallback fields Facebook serves to
-// anonymous crawlers on its mobile hosts. It reports whether extraction
-// succeeded by updating the inconclusive state.
-func (p *FacebookProvider) Extract(document Document) Metadata {
-	m := GenericHTMLProvider{}.Extract(document)
-	p.inconclusive = !m.Useful()
-	return m
-}
-
-// Inconclusive reports whether the last Extract call produced no useful
-// metadata, so a failed probe leaves the message alone instead of deleting it.
-func (p *FacebookProvider) Inconclusive() bool { return p.inconclusive }
-
 // GenericHTMLProvider extracts Open Graph, Twitter, and HTML fallback fields.
 type GenericHTMLProvider struct{}
 
@@ -156,23 +131,30 @@ func (GenericHTMLProvider) Extract(document Document) Metadata {
 		return Metadata{}
 	}
 	metadata := Metadata{}
+	if document.URL != nil {
+		metadata.Host = document.URL.Hostname()
+	}
+	hadOpenGraphTitle := false
 	var walk func(*html.Node)
 	walk = func(node *html.Node) {
 		if node.Type == html.ElementNode {
-			readNodeMetadata(node, &metadata)
+			readNodeMetadata(node, &metadata, &hadOpenGraphTitle)
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
 		}
 	}
 	walk(root)
+	if !hadOpenGraphTitle && metadata.Title != "" {
+		metadata.TitleFallback = true
+	}
 	if metadata.CanonicalURL == "" && document.URL != nil {
 		metadata.CanonicalURL = document.URL.String()
 	}
 	return metadata
 }
 
-func readNodeMetadata(node *html.Node, metadata *Metadata) {
+func readNodeMetadata(node *html.Node, metadata *Metadata, hadOpenGraphTitle *bool) {
 	attrs := make(map[string]string, len(node.Attr))
 	for _, attr := range node.Attr {
 		attrs[strings.ToLower(attr.Key)] = strings.TrimSpace(attr.Val)
@@ -187,6 +169,7 @@ func readNodeMetadata(node *html.Node, metadata *Metadata) {
 		switch property {
 		case "og:title":
 			metadata.Title = firstNonEmpty(metadata.Title, content)
+			*hadOpenGraphTitle = true
 		case "og:description":
 			metadata.Description = firstNonEmpty(metadata.Description, content)
 		case "og:site_name":
@@ -195,11 +178,14 @@ func readNodeMetadata(node *html.Node, metadata *Metadata) {
 			metadata.CanonicalURL = firstNonEmpty(metadata.CanonicalURL, content)
 		case "twitter:title":
 			metadata.Title = firstNonEmpty(metadata.Title, content)
+			*hadOpenGraphTitle = true
 		case "twitter:description", "description":
 			metadata.Description = firstNonEmpty(metadata.Description, content)
 		}
 	case "title":
-		metadata.Title = firstNonEmpty(metadata.Title, strings.TrimSpace(textContent(node)))
+		if metadata.Title == "" {
+			metadata.Title = strings.TrimSpace(textContent(node))
+		}
 	case "link":
 		if strings.EqualFold(attrs["rel"], "canonical") {
 			metadata.CanonicalURL = firstNonEmpty(metadata.CanonicalURL, attrs["href"])

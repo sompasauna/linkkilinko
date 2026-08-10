@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -150,22 +151,25 @@ func ExtractURLs(in Input) []URL {
 			continue
 		}
 		value := entity.URL
-		if entity.Type == urlEntity {
+		fromText := entity.Type == urlEntity
+		if fromText {
 			start, end, ok := utf16Span(text, entity.Offset, entity.Length)
 			if !ok {
 				continue
 			}
 			value = text[start:end]
 		}
-		if !validHTTPURL(value) {
+		value = strings.TrimSpace(value)
+		target, ok := canonicalHTTPTarget(value, fromText)
+		if !ok {
 			continue
 		}
 		urls = append(urls, URL{
-			Raw:       strings.TrimSpace(value),
-			Target:    strings.TrimSpace(value),
+			Raw:       value,
+			Target:    target,
 			Offset:    entity.Offset,
 			Length:    entity.Length,
-			FromText:  entity.Type == urlEntity,
+			FromText:  fromText,
 			FromLabel: entity.Type == textLinkEntity,
 		})
 	}
@@ -183,22 +187,26 @@ func IsLinkOnly(in Input) bool {
 	if in.MediaKind != "" {
 		return false
 	}
+	urls := ExtractURLs(in)
+	if len(urls) == 0 {
+		return false
+	}
 	text := in.Text
-	entities := in.Entities
 	if text == "" {
 		text = in.Caption
-		entities = in.CaptionEntities
 	}
-	if text == "" || len(ExtractURLs(in)) == 0 {
+	if text == "" {
 		return false
 	}
 
-	spans := make([]textSpan, 0, len(entities))
-	for _, entity := range entities {
-		if entity.Type != urlEntity && entity.Type != textLinkEntity {
-			continue
-		}
-		start, end, ok := utf16Span(text, entity.Offset, entity.Length)
+	// Only spans ExtractURLs accepted are removed. An entity present in the
+	// message but rejected by extraction (malformed port, disallowed scheme,
+	// corrupt span, ...) is not evidence of a URL and must not be erased from
+	// this determination merely because some other entity in the same
+	// message was accepted.
+	spans := make([]textSpan, 0, len(urls))
+	for _, candidate := range urls {
+		start, end, ok := utf16Span(text, candidate.Offset, candidate.Length)
 		if ok {
 			spans = append(spans, textSpan{start: start, end: end})
 		}
@@ -249,12 +257,72 @@ func NewcomerPlan(in Input, joinedAt, now time.Time, window time.Duration) (Plan
 	}, true
 }
 
+// canonicalHTTPTarget validates raw as an HTTP(S) URL and returns the
+// canonical target used for resolution, metadata retrieval, and
+// fingerprinting.
+//
+// A Bot API url entity (schemeless is true only for that entity type) whose
+// visible text carries no explicit scheme is treated as authoritative
+// evidence that its span is a URL: https:// is prefixed before validation,
+// so a scheme-less spelling and its explicit HTTPS spelling produce the same
+// canonical target. An explicit non-HTTP scheme, such as ftp:// or a
+// Telegram deep link, is rejected outright and is never reinterpreted as
+// HTTPS.
+func canonicalHTTPTarget(raw string, schemeless bool) (string, bool) {
+	target := raw
+	if schemeless && !hasExplicitScheme(raw) {
+		target = "https://" + raw
+	}
+	if !validHTTPURL(target) {
+		return "", false
+	}
+	return target, true
+}
+
 func validHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Hostname() == "" {
 		return false
 	}
-	return u.Scheme == "http" || u.Scheme == "https"
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || value == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// hasExplicitScheme reports whether raw begins with an RFC 3986 scheme
+// followed by "://". Telegram's url entity recognizer also produces
+// scheme-less text such as "example.com:8080/path", where the colon
+// precedes a port rather than a scheme; requiring the "//" keeps that case
+// from being misread as an explicit scheme named "example.com".
+func hasExplicitScheme(raw string) bool {
+	i := strings.Index(raw, "://")
+	if i <= 0 {
+		return false
+	}
+	return isSchemeToken(raw[:i])
+}
+
+func isSchemeToken(s string) bool {
+	for i, r := range s {
+		switch {
+		case i == 0 && isASCIILetter(r):
+		case i > 0 && (isASCIILetter(r) || (r >= '0' && r <= '9') || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetter(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 func normalizeURL(raw string) string {

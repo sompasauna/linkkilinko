@@ -16,7 +16,7 @@ google.wrapper.replacement: |-
 # Link-only post whose metadata probe found nothing useful. SPEC.md
 # "Link-only Preview Policy".
 preview.missing: |-
-  Linkistä ei ollut saatavilla esikatselutietoa. Voit lähettää linkin uudelleen, mutta kerro mitä linkin takaa löytyy.
+  Käyttäjä {sender} lähetti linkin ilman esikatselutietoja, joten viesti poistettiin. Voit lähettää linkin uudelleen, mutta kerro samalla mitä sen takaa löytyy.
 
 # Link-only post with previews explicitly disabled and useful metadata found.
 preview.enriched: |-

@@ -25,15 +25,22 @@ type Config struct {
 	UserAgent      string
 }
 
+// ipResolver resolves a host to one or more IP addresses. Production code
+// uses *net.Resolver; tests substitute a static mapping.
+type ipResolver interface {
+	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
 // Fetcher downloads bounded public HTTP(S) documents.
 type Fetcher struct {
 	client         *http.Client
 	maxBodyBytes   int64
 	maxRedirects   int
 	userAgent      string
-	resolver       *net.Resolver
+	resolver       ipResolver
 	requestTimeout time.Duration
 	totalTimeout   time.Duration
+	isPublic       func(net.IP) bool
 }
 
 type fragmentContextKey struct{}
@@ -69,6 +76,7 @@ func NewFetcher(config Config) (*Fetcher, error) {
 		resolver:       net.DefaultResolver,
 		requestTimeout: config.RequestTimeout,
 		totalTimeout:   config.TotalTimeout,
+		isPublic:       isPublicIP,
 	}
 	fetcher.client = &http.Client{
 		Transport: &http.Transport{
@@ -123,7 +131,9 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL, userAgent string) (preview.
 	state := &fragmentState{value: parsedURL.Fragment}
 	parsedURL.Fragment = ""
 	totalCtx = context.WithValue(totalCtx, fragmentContextKey{}, state)
-	request, err := http.NewRequestWithContext(totalCtx, http.MethodGet, parsedURL.String(), nil)
+	requestCtx, requestCancel := context.WithTimeout(totalCtx, f.requestTimeout)
+	defer requestCancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return preview.Document{}, fmt.Errorf("metadata: create request: %w", err)
 	}
@@ -163,11 +173,16 @@ func (f *Fetcher) dialContext(ctx context.Context, network, address string) (net
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
 	var lastErr error
+	start := time.Now()
 	for _, ip := range ips {
-		if !isPublicIP(ip) {
+		if !f.isPublic(ip) {
 			continue
 		}
-		dialer := &net.Dialer{Timeout: f.requestTimeout, KeepAlive: f.requestTimeout}
+		remaining := remainingBudget(ctx, start, f.requestTimeout)
+		if remaining <= 0 {
+			break
+		}
+		dialer := &net.Dialer{Timeout: remaining, KeepAlive: f.requestTimeout}
 		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if dialErr == nil {
 			return connection, nil
@@ -181,6 +196,26 @@ func (f *Fetcher) dialContext(ctx context.Context, network, address string) (net
 		return nil, fmt.Errorf("dial public address for %s: %w", host, lastErr)
 	}
 	return nil, fmt.Errorf("host %s has no public address", host)
+}
+
+// remainingBudget returns the lesser of the per-request budget minus elapsed
+// time and any deadline already imposed on ctx. It is used so the dialer
+// candidate loop cannot multiply its timeout across resolved addresses.
+func remainingBudget(ctx context.Context, start time.Time, perAttempt time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0
+		}
+		if remaining < perAttempt {
+			return remaining
+		}
+	}
+	elapsed := time.Since(start)
+	if elapsed >= perAttempt {
+		return 0
+	}
+	return perAttempt - elapsed
 }
 
 func parseURL(raw string) (*url.URL, error) {

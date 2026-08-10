@@ -62,6 +62,21 @@ func run(parent context.Context, configPath string) error {
 	}
 	defer func() { _ = state.Close() }()
 
+	owner, _, err := state.Owner(ctx)
+	if err != nil {
+		return err
+	}
+	approvedCount, err := state.ApprovedChatCount(ctx)
+	if err != nil {
+		return err
+	}
+	if owner == 0 {
+		slog.Warn("no owner registered; private /start required to bootstrap", "subsystem", "moderation")
+	} else {
+		slog.Info("owner registered", "subsystem", "moderation", "owner_id", owner)
+	}
+	slog.Info("approved groups", "subsystem", "moderation", "count", approvedCount)
+
 	metadataFetcher, err := metadata.NewFetcher(metadata.Config{
 		RequestTimeout: time.Duration(runtimeConfig.Metadata.RequestTimeout),
 		TotalTimeout:   time.Duration(runtimeConfig.Metadata.TotalTimeout),
@@ -80,7 +95,7 @@ func run(parent context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	previewRegistry, err := preview.NewRegistry(&preview.FacebookProvider{}, preview.GenericHTMLProvider{})
+	previewRegistry, err := preview.NewRegistry(preview.GenericHTMLProvider{})
 	if err != nil {
 		return err
 	}
@@ -89,16 +104,11 @@ func run(parent context.Context, configPath string) error {
 		return err
 	}
 	workflow := action.New(runtimeConfig, client, state, metadataFetcher, linkRegistry, previewRegistry, notices, time.Now)
-	allowedChats := make(map[int64]struct{}, len(runtimeConfig.Telegram.AllowedChatIDs))
-	for _, chatID := range runtimeConfig.Telegram.AllowedChatIDs {
-		allowedChats[chatID] = struct{}{}
-	}
 	app := &application{
-		config:       runtimeConfig,
-		allowedChats: allowedChats,
-		client:       client,
-		state:        state,
-		workflow:     workflow,
+		config:   runtimeConfig,
+		client:   client,
+		state:    state,
+		workflow: workflow,
 	}
 	stopHealth := startHealthServer(ctx, app, runtimeConfig.Operational.HealthListen)
 	defer stopHealth()
@@ -106,10 +116,17 @@ func run(parent context.Context, configPath string) error {
 	return client.Run(ctx, app.handleUpdate)
 }
 
+// telegramClient is the small Telegram surface that cmd/linkkilinko needs
+// beyond what action.Application consumes. It exists so handleBotMembership
+// can be exercised under test without a live Bot API.
+type telegramClient interface {
+	HasDeletePermission(ctx context.Context, chatID int64) (bool, error)
+	Ping(ctx context.Context) error
+}
+
 type application struct {
 	config         config.Config
-	allowedChats   map[int64]struct{}
-	client         *telegram.Client
+	client         telegramClient
 	state          *store.Store
 	workflow       *action.Application
 	updatesSeen    atomic.Uint64
@@ -232,9 +249,6 @@ func isGroupChat(chatType string) bool {
 }
 
 func (a *application) activeChat(ctx context.Context, chatID int64) (bool, error) {
-	if _, ok := a.allowedChats[chatID]; ok {
-		return true, nil
-	}
 	return a.state.ApprovedChat(ctx, chatID)
 }
 

@@ -2,12 +2,23 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sompasauna/linkkilinko/internal/store"
 )
+
+// testNoticePayload is a placeholder outbox payload shared by tests that
+// only need a canonical action to exist, not any particular payload text.
+const testNoticePayload = "notice"
+
+// newOutboxTestAction returns a minimal canonical action fixture for tests
+// that only need a single pending outbox entry to exist.
+func newOutboxTestAction() store.CanonicalAction {
+	return store.CanonicalAction{ChatID: 1, UserID: 2, Rule: "rule", BehaviorVersion: "v1", Fingerprint: "fp", Payload: testNoticePayload}
+}
 
 func TestOwnerBootstrapAndApprovedChatPersistAcrossRestart(t *testing.T) {
 	ctx := context.Background()
@@ -46,6 +57,19 @@ func TestOwnerBootstrapAndApprovedChatPersistAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestUnapprovedChatIsInert(t *testing.T) {
+	ctx := context.Background()
+	state, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	approved, err := state.ApprovedChat(ctx, 9999)
+	if err != nil || approved {
+		t.Fatalf("unapproved chat should be inert: approved=%v err=%v", approved, err)
+	}
+}
+
 func TestMembershipRejoinStartsNewWindow(t *testing.T) {
 	ctx := context.Background()
 	state, err := store.Open(ctx, "file::memory:?cache=shared")
@@ -77,7 +101,7 @@ func TestCanonicalCreationIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = state.Close() }()
-	action := store.CanonicalAction{ChatID: 1, UserID: 2, Rule: "rule", BehaviorVersion: "v1", Fingerprint: "fp", Payload: "notice"}
+	action := newOutboxTestAction()
 	first, created, err := state.CreateCanonical(ctx, action)
 	if err != nil || !created || first.ID == 0 {
 		t.Fatalf("first=%#v created=%v err=%v", first, created, err)
@@ -176,6 +200,78 @@ func TestCanonicalBehaviorVersionSupersedesOldRule(t *testing.T) {
 	repeat, created, err := state.CreateCanonical(ctx, current)
 	if err != nil || created || repeat.ID != fresh.ID {
 		t.Fatalf("v0.2 repost: action=%#v created=%v err=%v", repeat, created, err)
+	}
+}
+
+// TestPendingOutboxClaimIsExclusive pins the fix for t-002: the claim used to
+// be a value derived from now (now.Add(time.Minute).Unix()), so two calls
+// made within the same wall-clock second computed an identical value. The
+// second call's UPDATE correctly matched no rows, but its SELECT matched by
+// value equality anyway and returned the row the first call had just
+// claimed. Calling PendingOutbox twice with the exact same now reproduces
+// that without goroutines: only the first call may see the entry.
+func TestPendingOutboxClaimIsExclusive(t *testing.T) {
+	ctx := context.Background()
+	state, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = state.Close() }()
+	action := newOutboxTestAction()
+	created, ok, err := state.CreateCanonical(ctx, action)
+	if err != nil || !ok {
+		t.Fatalf("create canonical: created=%#v ok=%v err=%v", created, ok, err)
+	}
+	if err := state.AttachSourceMessage(ctx, created.ID, 44); err != nil {
+		t.Fatal(err)
+	}
+	frozen := time.Now().Add(time.Second)
+	first, err := state.PendingOutbox(ctx, frozen)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim: entries=%#v err=%v", first, err)
+	}
+	second, err := state.PendingOutbox(ctx, frozen)
+	if err != nil || len(second) != 0 {
+		t.Fatalf("second claim with identical now must see nothing already claimed: entries=%#v err=%v", second, err)
+	}
+}
+
+// TestMarkOutboxErrorReleasesLeaseForRequestedBackoff pins Do-item 2 of
+// t-002: a retryable failure must not leak the one-minute claim lease past a
+// shorter requested backoff, or the retry sits idle until the lease expires
+// on its own instead of at the caller's requested delay.
+func TestMarkOutboxErrorReleasesLeaseForRequestedBackoff(t *testing.T) {
+	ctx := context.Background()
+	state, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = state.Close() }()
+	action := newOutboxTestAction()
+	created, ok, err := state.CreateCanonical(ctx, action)
+	if err != nil || !ok {
+		t.Fatalf("create canonical: created=%#v ok=%v err=%v", created, ok, err)
+	}
+	if err := state.AttachSourceMessage(ctx, created.ID, 44); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := state.PendingOutbox(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	const requested = 5 * time.Second
+	if err := state.MarkOutboxErrorAfter(ctx, created.ID, "send_pending", errors.New("temporary"), requested); err != nil {
+		t.Fatal(err)
+	}
+	// Before the requested delay elapses there is nothing to retry yet.
+	if entries, err := state.PendingOutbox(ctx, now.Add(requested-time.Second)); err != nil || len(entries) != 0 {
+		t.Fatalf("premature retry: entries=%#v err=%v", entries, err)
+	}
+	// At the requested delay the entry must be retryable; a leaked one-minute
+	// lease would keep it hidden well past this point.
+	entries, err := state.PendingOutbox(ctx, now.Add(requested+time.Second))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("retry at requested backoff: entries=%#v err=%v", entries, err)
 	}
 }
 
