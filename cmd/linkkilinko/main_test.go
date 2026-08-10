@@ -36,3 +36,33 @@ func TestResponsePayloadRoundTrip(t *testing.T) {
 		t.Fatalf("decoded = %#v, want %#v", decoded, original)
 	}
 }
+
+func TestOwnerMatchesOnlyPersistedOwner(t *testing.T) {
+	tests := []struct {
+		name  string
+		found bool
+		owner int64
+		actor int64
+		want  bool
+	}{
+		{name: "matching owner", found: true, owner: 42, actor: 42, want: true},
+		{name: "different user", found: true, owner: 42, actor: 99},
+		{name: "no owner", found: false, owner: 42, actor: 42},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ownerMatches(test.found, test.owner, test.actor); got != test.want {
+				t.Fatalf("ownerMatches() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGroupChatRecognition(t *testing.T) {
+	if !isGroupChat(telego.ChatTypeGroup) || !isGroupChat(telego.ChatTypeSupergroup) {
+		t.Fatal("group and supergroup chats must be recognized")
+	}
+	if isGroupChat(telego.ChatTypePrivate) {
+		t.Fatal("private chats must not be recognized as groups")
+	}
+}

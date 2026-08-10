@@ -30,6 +30,23 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// HasDeletePermission verifies that the bot is an administrator able to delete
+// other members' messages in chatID.
+func (c *Client) HasDeletePermission(ctx context.Context, chatID int64) (bool, error) {
+	if c == nil || c.bot == nil {
+		return false, errors.New("telegram: client is nil")
+	}
+	member, err := c.bot.GetChatMember(ctx, &telego.GetChatMemberParams{
+		ChatID: telego.ChatID{ID: chatID},
+		UserID: c.bot.ID(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("telegram: check bot permissions: %w", err)
+	}
+	administrator, ok := member.(*telego.ChatMemberAdministrator)
+	return ok && administrator.CanDeleteMessages, nil
+}
+
 // New creates a Telegram client after validating the bot token with telego.
 func New(token string) (*Client, error) {
 	bot, err := telego.NewBot(token)

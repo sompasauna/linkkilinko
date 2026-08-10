@@ -2,11 +2,49 @@ package store_test
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sompasauna/linkkilinko/internal/store"
 )
+
+func TestOwnerBootstrapAndApprovedChatPersistAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "state.sqlite")
+	state, err := store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := state.RegisterOwner(ctx, 42)
+	if err != nil || !registered {
+		t.Fatalf("first owner registration = %v, err=%v", registered, err)
+	}
+	registered, err = state.RegisterOwner(ctx, 99)
+	if err != nil || registered {
+		t.Fatalf("second owner registration = %v, err=%v", registered, err)
+	}
+	if err := state.ApproveChat(ctx, -1001, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err = store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	owner, found, err := state.Owner(ctx)
+	if err != nil || !found || owner != 42 {
+		t.Fatalf("owner=%d found=%v err=%v", owner, found, err)
+	}
+	approved, err := state.ApprovedChat(ctx, -1001)
+	if err != nil || !approved {
+		t.Fatalf("approved=%v err=%v", approved, err)
+	}
+}
 
 func TestMembershipRejoinStartsNewWindow(t *testing.T) {
 	ctx := context.Background()

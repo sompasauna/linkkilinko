@@ -119,11 +119,17 @@ type application struct {
 func (a *application) handleUpdate(ctx context.Context, update telego.Update) error {
 	a.updatesSeen.Add(1)
 	a.lastUpdateUnix.Store(time.Now().Unix())
+	if update.Message != nil && update.Message.Chat.Type == telego.ChatTypePrivate {
+		return a.handlePrivateMessage(ctx, *update.Message)
+	}
+	if update.EditedMessage != nil && update.EditedMessage.Chat.Type == telego.ChatTypePrivate {
+		return nil
+	}
 	if update.ChatMember != nil {
 		return a.handleMembership(ctx, *update.ChatMember)
 	}
 	if update.MyChatMember != nil {
-		return nil
+		return a.handleBotMembership(ctx, *update.MyChatMember)
 	}
 	message := update.Message
 	if message == nil {
@@ -132,7 +138,11 @@ func (a *application) handleUpdate(ctx context.Context, update telego.Update) er
 	if message == nil || message.MessageID <= 0 {
 		return nil
 	}
-	if _, ok := a.allowedChats[message.Chat.ID]; !ok {
+	active, err := a.activeChat(ctx, message.Chat.ID)
+	if err != nil {
+		return err
+	}
+	if !active {
 		return nil
 	}
 	if len(message.NewChatMembers) > 0 {
@@ -160,14 +170,83 @@ func (a *application) handleUpdate(ctx context.Context, update telego.Update) er
 	return a.state.CompleteUpdate(ctx, input.ChatID, input.MessageID, input.EditDate)
 }
 
-func (a *application) handleMembership(ctx context.Context, update telego.ChatMemberUpdated) error {
-	if _, ok := a.allowedChats[update.Chat.ID]; !ok || update.NewChatMember == nil {
+func (a *application) handlePrivateMessage(ctx context.Context, message telego.Message) error {
+	if message.From == nil || strings.TrimSpace(message.Text) != "/start" {
 		return nil
 	}
+	registered, err := a.state.RegisterOwner(ctx, message.From.ID)
+	if err != nil {
+		return err
+	}
+	if registered {
+		slog.Info("registered bot owner", "subsystem", "moderation", "user_id", message.From.ID)
+		return nil
+	}
+	owner, _, err := a.state.Owner(ctx)
+	if err != nil {
+		return err
+	}
+	if owner != message.From.ID {
+		slog.Warn("rejected owner bootstrap claim", "subsystem", "moderation", "user_id", message.From.ID)
+	}
+	return nil
+}
+
+func (a *application) handleBotMembership(ctx context.Context, update telego.ChatMemberUpdated) error {
+	owner, found, err := a.state.Owner(ctx)
+	if err != nil {
+		return err
+	}
+	if !ownerMatches(found, owner, update.From.ID) || update.NewChatMember == nil {
+		slog.Warn("ignored unauthorized group approval", "subsystem", "moderation", "chat_id", update.Chat.ID, "user_id", update.From.ID)
+		return nil
+	}
+	if !isGroupChat(update.Chat.Type) {
+		return nil
+	}
+	if update.NewChatMember.MemberStatus() != telego.MemberStatusAdministrator && update.NewChatMember.MemberStatus() != telego.MemberStatusCreator {
+		slog.Warn("group approval pending bot administrator status", "subsystem", "moderation", "chat_id", update.Chat.ID)
+		return nil
+	}
+	canDelete, err := a.client.HasDeletePermission(ctx, update.Chat.ID)
+	if err != nil {
+		return err
+	}
+	if !canDelete {
+		slog.Error("group approval rejected: bot lacks delete permission", "subsystem", "telegram", "chat_id", update.Chat.ID)
+		return nil
+	}
+	if err := a.state.ApproveChat(ctx, update.Chat.ID, owner); err != nil {
+		return err
+	}
+	slog.Info("approved group", "subsystem", "moderation", "chat_id", update.Chat.ID, "user_id", owner)
+	return nil
+}
+
+func ownerMatches(found bool, ownerID, actorID int64) bool {
+	return found && ownerID > 0 && ownerID == actorID
+}
+
+func isGroupChat(chatType string) bool {
+	return chatType == telego.ChatTypeGroup || chatType == telego.ChatTypeSupergroup
+}
+
+func (a *application) activeChat(ctx context.Context, chatID int64) (bool, error) {
+	if _, ok := a.allowedChats[chatID]; ok {
+		return true, nil
+	}
+	return a.state.ApprovedChat(ctx, chatID)
+}
+
+func (a *application) handleMembership(ctx context.Context, update telego.ChatMemberUpdated) error {
+	active, err := a.activeChat(ctx, update.Chat.ID)
+	if err != nil || !active || update.NewChatMember == nil {
+		return err
+	}
 	status := update.NewChatMember.MemberStatus()
-	active := status == telego.MemberStatusCreator || status == telego.MemberStatusAdministrator || status == telego.MemberStatusMember || status == telego.MemberStatusRestricted
+	activeMember := status == telego.MemberStatusCreator || status == telego.MemberStatusAdministrator || status == telego.MemberStatusMember || status == telego.MemberStatusRestricted
 	member := update.NewChatMember.MemberUser()
-	return a.state.RecordMembership(ctx, update.Chat.ID, member.ID, status, time.Unix(update.Date, 0).UTC(), active)
+	return a.state.RecordMembership(ctx, update.Chat.ID, member.ID, status, time.Unix(update.Date, 0).UTC(), activeMember)
 }
 
 func messageInput(message telego.Message) moderation.Input {

@@ -58,6 +58,66 @@ type Store struct {
 	db *sql.DB
 }
 
+// RegisterOwner stores the first bootstrap owner and reports whether this call
+// registered it. Existing owners are never replaced.
+func (s *Store) RegisterOwner(ctx context.Context, userID int64) (bool, error) {
+	if userID <= 0 {
+		return false, errors.New("store: owner user id must be positive")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO bot_owner(id, user_id, registered_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO NOTHING`, userID, time.Now().Unix())
+	if err != nil {
+		return false, fmt.Errorf("store: register owner: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: register owner rows: %w", err)
+	}
+	return rows == 1, nil
+}
+
+// Owner returns the durably registered bootstrap owner.
+func (s *Store) Owner(ctx context.Context) (int64, bool, error) {
+	var userID int64
+	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM bot_owner WHERE id = 1`).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: read owner: %w", err)
+	}
+	return userID, true, nil
+}
+
+// ApproveChat records a group approved by the bootstrap owner.
+func (s *Store) ApproveChat(ctx context.Context, chatID, approvedBy int64) error {
+	if chatID == 0 || approvedBy <= 0 {
+		return errors.New("store: invalid approved chat or owner")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO approved_chats(chat_id, approved_by, approved_at) VALUES (?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET approved_by = excluded.approved_by,
+		approved_at = excluded.approved_at`, chatID, approvedBy, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("store: approve chat: %w", err)
+	}
+	return nil
+}
+
+// ApprovedChat reports whether a group has been durably approved.
+func (s *Store) ApprovedChat(ctx context.Context, chatID int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM approved_chats WHERE chat_id = ?`, chatID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: check approved chat: %w", err)
+	}
+	return exists == 1, nil
+}
+
 // Open opens a SQLite database and applies the current schema transactionally.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
@@ -507,6 +567,16 @@ func (s *Store) RecordSuppressed(ctx context.Context, actionID int64, messageID 
 
 func (s *Store) migrate(ctx context.Context) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS bot_owner (
+			id INTEGER PRIMARY KEY CHECK(id = 1),
+			user_id INTEGER NOT NULL UNIQUE,
+			registered_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS approved_chats (
+			chat_id INTEGER PRIMARY KEY,
+			approved_by INTEGER NOT NULL,
+			approved_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS memberships (
 			chat_id INTEGER NOT NULL,
 			user_id INTEGER NOT NULL,
