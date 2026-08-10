@@ -131,7 +131,9 @@ func validate(language string, messages map[string]string) error {
 		return fmt.Errorf("notice: catalog %q defines unknown keys: %s", language, strings.Join(unknown, ", "))
 	}
 	allowed := map[string]map[string]struct{}{
+		moderation.NoticeNewcomerSandbox: {},
 		moderation.NoticeGoogleWrapper:   {"sender": {}, "content": {}},
+		moderation.NoticePreviewMissing:  {},
 		moderation.NoticePreviewEnriched: {"sender": {}, "url": {}, "metadata": {}},
 	}
 	placeholderPattern := regexp.MustCompile(`\{([a-z]+)\}`)

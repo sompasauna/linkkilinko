@@ -17,6 +17,9 @@ Operators may overlay the selected notice catalog with
 `moderation.notice_catalog: /path/to/catalog.yaml`; unspecified keys retain
 the embedded Finnish catalog text.
 
+Unknown keys, empty values, malformed YAML, and placeholders unsupported by the
+notice key fail startup.
+
 ## Development
 
 Prerequisites are Go 1.26.5+, `golangci-lint`, and `govulncheck`.

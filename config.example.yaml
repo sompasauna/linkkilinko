@@ -9,6 +9,8 @@ database:
 moderation:
   newcomer_sandbox: 48h
   notice_language: "fi"
+  # Optional YAML overlay; unspecified keys retain embedded wording.
+  notice_catalog: ""
 
 metadata:
   request_timeout: 5s

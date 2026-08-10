@@ -153,9 +153,9 @@ database:
 
 moderation:
   newcomer_sandbox: 48h
-    notice_language: "fi"
-    # Optional YAML overlay; embedded catalog entries remain the defaults.
-    notice_catalog: ""
+  notice_language: "fi"
+  # Optional YAML overlay; embedded catalog entries remain the defaults.
+  notice_catalog: ""
 
 metadata:
   request_timeout: 5s
@@ -174,6 +174,10 @@ Required validation:
 5. The database directory exists and is writable, or can be created safely.
 6. `notice_language` is non-empty and selects a compiled-in message catalog that
    defines every notice key policy can emit. Startup fails otherwise.
+
+If `notice_catalog` is configured, it is a YAML overlay keyed by notice key.
+Unspecified keys retain the embedded catalog text. Unknown keys, empty values,
+malformed YAML, and placeholders unsupported by the notice key fail at startup.
 
 User-visible notice and replacement text is not written inline in policy or
 transport code. Policy emits a notice key plus parameters; a per-language
