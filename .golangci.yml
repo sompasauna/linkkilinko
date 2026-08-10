@@ -1,0 +1,83 @@
+version: "2"
+
+run:
+  tests: true
+  allow-parallel-runners: true
+
+linters:
+  default: all
+  disable:
+    - cyclop
+    - depguard
+    - dogsled
+    - embeddedstructfieldcheck
+    - err113
+    - exhaustive
+    - exhaustruct
+    - forbidigo
+    - funcorder
+    - gochecknoglobals
+    - gochecknoinits
+    - gocognit
+    - gocyclo
+    - godoclint
+    - godox
+    - goheader
+    - ireturn
+    - lll
+    - mnd
+    - nlreturn
+    - noinlineerr
+    - nonamedreturns
+    - contextcheck
+    - paralleltest
+    - tagalign
+    - tagliatelle
+    - tparallel
+    - wsl
+    - wsl_v5
+    - wrapcheck
+  settings:
+    funlen:
+      lines: 100
+      statements: 75
+    varnamelen:
+      max-distance: 10
+      ignore-decls:
+        - w http.ResponseWriter
+        - r *http.Request
+        - r io.Reader
+        - i int
+        - n int
+        - j int
+        - ok bool
+        - p []byte
+        - mu sync.Mutex
+        - w io.Writer
+        - wg sync.WaitGroup
+        - s string
+        - sb strings.Builder
+        - sb *strings.Builder
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - varnamelen
+        path: "(.+)_test\\.go"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax

@@ -1,0 +1,22 @@
+telegram:
+  token: ""
+  allowed_chat_ids:
+    - 1234
+
+database:
+  path: "./linkkilinko.sqlite"
+
+moderation:
+  newcomer_sandbox: 48h
+  notice_language: "fi"
+
+metadata:
+  request_timeout: 5s
+  total_timeout: 10s
+  max_redirects: 5
+  max_html_bytes: 2097152
+  user_agent: "linkkilinko/0.1"
+
+# Optional local HTTP health endpoints. Empty keeps the listener disabled.
+operational:
+  health_listen: ""

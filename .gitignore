@@ -1,0 +1,40 @@
+# Go binaries and test artifacts.
+/linkkilinko
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Local Go workspaces and environment files.
+go.work
+go.work.sum
+.env
+
+# Project-local scratch space, databases, and agent state.
+*.lock
+.tmp/
+tmp/
+*.sqlite-shm
+*.sqlite-wal
+.stick/
+.shmore/
+todo/
+.worktrees/
+.claude/worktrees/
+
+# Local agent instructions and harness configuration.
+AGENTS.md
+CLAUDE.md
+opencode.json
+.agents/
+.claude/
+.codex/
+
+# Runtime configuration and state must never be committed.
+config.yaml
+*.db
+*.sqlite

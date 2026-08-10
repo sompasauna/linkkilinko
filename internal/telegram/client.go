@@ -1,0 +1,147 @@
+// Package telegram contains the small Telegram transport boundary used by the
+// linkkilinko runtime.
+package telegram
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
+)
+
+// Client wraps the Telegram Bot API methods needed by moderation.
+type Client struct {
+	bot *telego.Bot
+}
+
+// Ping verifies that the bot token can reach Telegram's Bot API.
+func (c *Client) Ping(ctx context.Context) error {
+	if c == nil || c.bot == nil {
+		return errors.New("telegram: client is nil")
+	}
+	if _, err := c.bot.GetMe(ctx); err != nil {
+		return fmt.Errorf("telegram: ping bot API: %w", err)
+	}
+	return nil
+}
+
+// New creates a Telegram client after validating the bot token with telego.
+func New(token string) (*Client, error) {
+	bot, err := telego.NewBot(token)
+	if err != nil {
+		return nil, fmt.Errorf("telegram: create bot: %w", err)
+	}
+	return &Client{bot: bot}, nil
+}
+
+// Run receives the explicitly subscribed update kinds until ctx is cancelled.
+func (c *Client) Run(ctx context.Context, handler func(context.Context, telego.Update) error) error {
+	if c == nil || c.bot == nil {
+		return errors.New("telegram: client is nil")
+	}
+	if handler == nil {
+		return errors.New("telegram: update handler is nil")
+	}
+	updates, err := c.bot.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
+		Timeout: 30,
+		AllowedUpdates: []string{
+			telego.MessageUpdates,
+			telego.EditedMessageUpdates,
+			telego.ChatMemberUpdates,
+			telego.MyChatMemberUpdates,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("telegram: start long polling: %w", err)
+	}
+	for update := range updates {
+		if err := handler(ctx, update); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.New("telegram: update stream closed")
+}
+
+// Delete removes one message from a chat.
+func (c *Client) Delete(ctx context.Context, chatID int64, messageID int) error {
+	if c == nil || c.bot == nil {
+		return errors.New("telegram: client is nil")
+	}
+	if err := c.bot.DeleteMessage(ctx, &telego.DeleteMessageParams{
+		ChatID:    telego.ChatID{ID: chatID},
+		MessageID: messageID,
+	}); err != nil {
+		return fmt.Errorf("telegram: delete message %d: %w", messageID, err)
+	}
+	return nil
+}
+
+// Send sends plain text into a chat topic and returns the new message id.
+func (c *Client) Send(ctx context.Context, chatID int64, threadID int, text string, entities ...telego.MessageEntity) (int, error) {
+	if c == nil || c.bot == nil {
+		return 0, errors.New("telegram: client is nil")
+	}
+	message, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID:          telego.ChatID{ID: chatID},
+		MessageThreadID: threadID,
+		Text:            text,
+		Entities:        entities,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("telegram: send message: %w", err)
+	}
+	return message.MessageID, nil
+}
+
+// Copy copies a message into the same chat topic and optionally replaces its caption.
+func (c *Client) Copy(ctx context.Context, chatID int64, threadID int, sourceMessageID int, caption string, entities ...telego.MessageEntity) (int, error) {
+	if c == nil || c.bot == nil {
+		return 0, errors.New("telegram: client is nil")
+	}
+	messageID, err := c.bot.CopyMessage(ctx, &telego.CopyMessageParams{
+		ChatID:          telego.ChatID{ID: chatID},
+		MessageThreadID: threadID,
+		FromChatID:      telego.ChatID{ID: chatID},
+		MessageID:       sourceMessageID,
+		Caption:         caption,
+		CaptionEntities: entities,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("telegram: copy message %d: %w", sourceMessageID, err)
+	}
+	if messageID == nil {
+		return 0, errors.New("telegram: copy message returned no message id")
+	}
+	return messageID.MessageID, nil
+}
+
+// IsMessageNotFound reports whether Telegram already considers a message absent.
+func IsMessageNotFound(err error) bool {
+	var apiErr *telegoapi.Error
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == 400 && strings.Contains(strings.ToLower(apiErr.Description), "message to delete not found")
+}
+
+// IsPermanentError reports Telegram client errors that should not be retried forever.
+func IsPermanentError(err error) bool {
+	var apiErr *telegoapi.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.ErrorCode >= 400 && apiErr.ErrorCode < 500 && apiErr.ErrorCode != 429
+}
+
+// RetryAfter returns Telegram's requested retry delay when present.
+func RetryAfter(err error) (time.Duration, bool) {
+	var apiErr *telegoapi.Error
+	if !errors.As(err, &apiErr) || apiErr.Parameters == nil || apiErr.Parameters.RetryAfter <= 0 {
+		return 0, false
+	}
+	return time.Duration(apiErr.Parameters.RetryAfter) * time.Second, true
+}
