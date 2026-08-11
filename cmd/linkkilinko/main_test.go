@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mymmrac/telego"
@@ -120,7 +120,7 @@ func TestOperatorResetOwnerWithoutOwnerFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when no owner is registered")
 	}
-	if !errors.Is(err, err) {
+	if !strings.Contains(err.Error(), "no bot owner registered") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
