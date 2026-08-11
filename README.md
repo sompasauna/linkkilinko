@@ -136,8 +136,8 @@ summary line carries `chat_id`, `thread_id`, `message_id`, `sender_id`,
 line so an operator can filter one message across the Telegram adapter,
 resolver, metadata, store, and outbox stages.
 
-Full URLs are never written to logs. Only the host and a `url_has_query`
-flag are recorded; query values are redacted. Bot tokens, response bodies,
+Logged moderation URLs retain their scheme, host, and path for diagnosis;
+query values and credentials are redacted. Bot tokens, response bodies,
 and sender-controlled message text are also out of bounds for logging.
 
 When a message is reported with `preview_disabled=true` and the bot appears

@@ -33,6 +33,7 @@ type fakeTelegram struct {
 	sendHook     func(chatID int64, threadID int, text string) (int, error)
 	deleteCalled []int
 	sentCalled   []sentMsg
+	repliedTo    []int
 }
 
 type sentMsg struct {
@@ -55,6 +56,11 @@ func (f *fakeTelegram) Send(_ context.Context, chatID int64, threadID int, text 
 		return f.sendHook(chatID, threadID, text)
 	}
 	return len(f.sentCalled), nil
+}
+
+func (f *fakeTelegram) Reply(ctx context.Context, chatID int64, threadID, _ int, text string, entities ...telego.MessageEntity) (int, error) {
+	f.repliedTo = append(f.repliedTo, 1)
+	return f.Send(ctx, chatID, threadID, text, entities...)
 }
 
 func (f *fakeTelegram) Copy(_ context.Context, _ int64, _, _ int, _ string, _ ...telego.MessageEntity) (int, error) {
@@ -486,6 +492,34 @@ func TestEstablishedSchemelessLinkOnlyReachesMetadataAndPreviewPolicy(t *testing
 	}
 }
 
+func TestDisabledPreviewKeepsOriginalAndRepliesWithMetadata(t *testing.T) {
+	t.Parallel()
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
+		docs: map[string]preview.Document{testURL: {
+			URL: &url.URL{Host: testURLHost}, Body: []byte("<html></html>"), ContentType: testContentType,
+		}},
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Example Page"}}
+	app := newTestApp(tc, st, md, pv)
+	st.memberships[membershipKey{1, 100}] = store.Membership{
+		ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour),
+	}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100, PreviewDisabled: true,
+		Text: testURL, Entities: []moderation.Entity{{
+			Type: testEntityType, Offset: 0, Length: len(testURL), URL: testURL,
+		}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.deleteCalled) != 0 {
+		t.Fatal("disabled-preview metadata reply deleted the original message")
+	}
+	if len(tc.repliedTo) != 1 {
+		t.Fatalf("metadata replies = %d, want 1", len(tc.repliedTo))
+	}
+}
+
 func TestDeleteFailureDoesNotSend(t *testing.T) {
 	t.Parallel()
 	tc := &fakeTelegram{}
@@ -746,11 +780,11 @@ func TestSendFailureAfterSuccessfulDelete(t *testing.T) {
 	tc.sendHook = func(_ int64, _ int, _ string) (int, error) { return 0, sendErr }
 	st, md, pv := newFakeStore(), &fakeMetadata{
 		docs: map[string]preview.Document{testURL: {URL: &url.URL{Host: testURLHost}, Body: []byte("<html><title>Title</title></html>"), ContentType: testContentType}},
-	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Title"}}
+	}, &fakePreviews{}
 	app := newTestApp(tc, st, md, pv)
 	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
 	input := moderation.Input{
-		ChatID: 1, MessageID: 10, SenderID: 100, PreviewDisabled: true,
+		ChatID: 1, MessageID: 10, SenderID: 100,
 		Text:     testURL,
 		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(testURL), URL: testURL}},
 	}

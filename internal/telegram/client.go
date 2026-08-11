@@ -141,10 +141,20 @@ func (c *Client) Delete(ctx context.Context, chatID int64, messageID int) error 
 
 // Send sends plain text into a chat topic and returns the new message id.
 func (c *Client) Send(ctx context.Context, chatID int64, threadID int, text string, entities ...telego.MessageEntity) (int, error) {
+	return c.send(ctx, chatID, threadID, 0, text, entities...)
+}
+
+// Reply sends plain text as a reply to an existing message without generating
+// another link preview.
+func (c *Client) Reply(ctx context.Context, chatID int64, threadID, replyTo int, text string, entities ...telego.MessageEntity) (int, error) {
+	return c.send(ctx, chatID, threadID, replyTo, text, entities...)
+}
+
+func (c *Client) send(ctx context.Context, chatID int64, threadID, replyTo int, text string, entities ...telego.MessageEntity) (int, error) {
 	if c == nil || c.bot == nil {
 		return 0, errors.New("telegram: client is nil")
 	}
-	message, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+	params := &telego.SendMessageParams{
 		ChatID:          telego.ChatID{ID: chatID},
 		MessageThreadID: threadID,
 		Text:            text,
@@ -153,7 +163,11 @@ func (c *Client) Send(ctx context.Context, chatID int64, threadID int, text stri
 		// preview for a URL they mention. The original user message is the
 		// message whose native preview policy we evaluate.
 		LinkPreviewOptions: &telego.LinkPreviewOptions{IsDisabled: true},
-	})
+	}
+	if replyTo > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyTo}
+	}
+	message, err := c.bot.SendMessage(ctx, params)
 	if err != nil {
 		return 0, fmt.Errorf("telegram: send message: %w", err)
 	}

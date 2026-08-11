@@ -37,6 +37,10 @@ func (b *barrierTelegram) Send(context.Context, int64, int, string, ...telego.Me
 	return 1, nil
 }
 
+func (b *barrierTelegram) Reply(ctx context.Context, chatID int64, threadID, _ int, text string, entities ...telego.MessageEntity) (int, error) {
+	return b.Send(ctx, chatID, threadID, text, entities...)
+}
+
 func (b *barrierTelegram) Copy(context.Context, int64, int, int, string, ...telego.MessageEntity) (int, error) {
 	return 1, nil
 }

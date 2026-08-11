@@ -345,7 +345,7 @@ This stage applies only to link-only messages after tracked-link rewriting.
 
 1. Probe each URL through the metadata subsystem.
 2. If the user explicitly disabled Telegram previews and useful metadata is
-   available, delete the original and post an enriched replacement.
+   available, keep the original and reply to it with only the fetched metadata.
 3. If a successful, definitive probe finds no useful metadata, delete the
    original and post the explanatory-text notice.
 4. If useful metadata is available and the preview was not explicitly disabled,
@@ -355,11 +355,8 @@ This stage applies only to link-only messages after tracked-link rewriting.
    original in place and log the reason. Infrastructure failure is not proof
    that a page lacks metadata.
 
-Enriched replacement template:
+Metadata reply template:
 
-> Käyttäjä {mention} lähetti linkin {url} ilman esikatselutietoja.
-> Esikatselutiedot haettiin automaattisesti tähän viestiin.
->
 > {site name, when available}
 > {title}
 > {description, when available}
@@ -551,7 +548,8 @@ names; membership-age classification; normalized source and destination hosts;
 canonical action id; whether deletion was a silent repost suppression; outcomes,
 retry count, error class, and duration.
 
-Full URLs are debug-only and query values are redacted. The bot stores only data
+Logged URLs retain scheme, host, and path for diagnosis; query values and
+credentials are redacted. The bot stores only data
 needed for membership enforcement, idempotency, canonical responses, retries,
 and operator diagnosis. Message bodies are removed after fingerprinting and
 terminal outbox completion unless needed for the active canonical payload.
@@ -613,9 +611,9 @@ A private Telegram test group demonstrates:
    are replaced with verified direct URLs and correct attribution.
 5. Reposting either unchanged wrapper message produces no second replacement;
    changing the accompanying text produces a new canonical action.
-6. A link-only post with an explicitly disabled preview is either enriched from
-   fetched metadata or removed with the no-metadata notice, and an unchanged
-   repost is silent.
+6. A link-only post with an explicitly disabled preview keeps the original and
+   receives a metadata-only reply when metadata is available; otherwise it is
+   removed with the no-metadata notice, and an unchanged repost is silent.
 7. A restart preserves newcomer age, canonical suppression, and outbox state.
 8. Removing delete permission produces a visible operator error and no duplicate
    replacement.

@@ -43,6 +43,7 @@ const previewProviderLabel = "generic_html"
 const (
 	operationText       = "text"
 	operationCopyMedia  = "copy_media"
+	operationReply      = "reply"
 	messageTextLimit    = 3900
 	captionTextLimit    = 1000
 	placeholderSender   = "sender"
@@ -63,6 +64,7 @@ const (
 	fieldURLCount            = "url_count"
 	fieldURLIndex            = "url_index"
 	fieldURLHost             = "url_host"
+	fieldURL                 = "url"
 	fieldURLHasQuery         = "url_has_query"
 	fieldLinkOnly            = "link_only"
 	fieldPreviewOptions      = "preview_options"
@@ -103,6 +105,7 @@ type Application struct {
 type TelegramPort interface {
 	Delete(ctx context.Context, chatID int64, messageID int) error
 	Send(ctx context.Context, chatID int64, threadID int, text string, entities ...telego.MessageEntity) (int, error)
+	Reply(ctx context.Context, chatID int64, threadID, replyTo int, text string, entities ...telego.MessageEntity) (int, error)
 	Copy(ctx context.Context, chatID int64, threadID, sourceMessageID int, caption string, entities ...telego.MessageEntity) (int, error)
 }
 
@@ -464,6 +467,10 @@ func (a *Application) applyPlan(ctx context.Context, input moderation.Input, pla
 		payload.FallbackText = text
 		payload.FallbackItems = payload.Entities
 	}
+	if plan.NoticeKey == moderation.NoticePreviewEnriched {
+		payload.Operation = operationReply
+		payload.ReplyTo = input.MessageID
+	}
 	encodedPayload, err := encodeResponsePayload(payload)
 	if err != nil {
 		return err
@@ -486,21 +493,29 @@ func (a *Application) applyPlan(ctx context.Context, input moderation.Input, pla
 }
 
 func (a *Application) applyTextAction(ctx context.Context, input moderation.Input, action store.CanonicalAction, payload responsePayload) error {
-	if err := a.state.MarkDeleteRequested(ctx, action.ID); err != nil {
-		return err
-	}
-	if err := a.client.Delete(ctx, input.ChatID, input.MessageID); err != nil && !telegram.IsMessageNotFound(err) {
-		if telegram.IsDeletePermissionError(err) {
-			slog.Error("bot cannot delete moderated message", "subsystem", "telegram", "chat_id", input.ChatID, "message_id", input.MessageID, "error", err)
+	if payload.Operation != operationReply {
+		if err := a.state.MarkDeleteRequested(ctx, action.ID); err != nil {
+			return err
 		}
-		_ = a.markOutboxError(ctx, action.ID, "delete_requested", err)
-		slog.Warn("message deletion failed; action queued", "chat_id", input.ChatID, "message_id", input.MessageID, "error", err)
-		return nil
+		if err := a.client.Delete(ctx, input.ChatID, input.MessageID); err != nil && !telegram.IsMessageNotFound(err) {
+			if telegram.IsDeletePermissionError(err) {
+				slog.Error("bot cannot delete moderated message", "subsystem", "telegram", "chat_id", input.ChatID, "message_id", input.MessageID, "error", err)
+			}
+			_ = a.markOutboxError(ctx, action.ID, "delete_requested", err)
+			slog.Warn("message deletion failed; action queued", "chat_id", input.ChatID, "message_id", input.MessageID, "error", err)
+			return nil
+		}
 	}
 	if err := a.state.MarkSendPending(ctx, action.ID); err != nil {
 		return err
 	}
-	responseID, err := a.client.Send(ctx, input.ChatID, input.ThreadID, payload.Text, payload.Entities...)
+	var responseID int
+	var err error
+	if payload.Operation == operationReply {
+		responseID, err = a.client.Reply(ctx, input.ChatID, input.ThreadID, payload.ReplyTo, payload.Text, payload.Entities...)
+	} else {
+		responseID, err = a.client.Send(ctx, input.ChatID, input.ThreadID, payload.Text, payload.Entities...)
+	}
 	if err != nil {
 		_ = a.markOutboxError(ctx, action.ID, "send_pending", err)
 		slog.Warn("moderation response failed; action queued", "action_id", action.ID, "error", err)
@@ -578,10 +593,12 @@ func (a *Application) retryOutbox(ctx context.Context) error {
 				_ = a.state.ReleaseOutboxLease(ctx, actionID)
 				continue
 			}
-			if err := a.client.Delete(ctx, entry.ChatID, entry.SourceMessageID); err != nil && !telegram.IsMessageNotFound(err) {
-				_ = a.markOutboxError(ctx, entry.CanonicalActionID, "delete_requested", err)
-				_ = a.state.ReleaseOutboxLease(ctx, actionID)
-				continue
+			if payload.Operation != operationReply {
+				if err := a.client.Delete(ctx, entry.ChatID, entry.SourceMessageID); err != nil && !telegram.IsMessageNotFound(err) {
+					_ = a.markOutboxError(ctx, entry.CanonicalActionID, "delete_requested", err)
+					_ = a.state.ReleaseOutboxLease(ctx, actionID)
+					continue
+				}
 			}
 			if err := a.state.MarkSendPending(ctx, entry.CanonicalActionID); err != nil {
 				_ = a.state.ReleaseOutboxLease(ctx, actionID)
@@ -595,7 +612,12 @@ func (a *Application) retryOutbox(ctx context.Context) error {
 			}
 			continue
 		}
-		responseID, err := a.client.Send(ctx, entry.ChatID, entry.ThreadID, payload.Text, payload.Entities...)
+		var responseID int
+		if payload.Operation == operationReply {
+			responseID, err = a.client.Reply(ctx, entry.ChatID, entry.ThreadID, payload.ReplyTo, payload.Text, payload.Entities...)
+		} else {
+			responseID, err = a.client.Send(ctx, entry.ChatID, entry.ThreadID, payload.Text, payload.Entities...)
+		}
 		if err != nil {
 			_ = a.markOutboxError(ctx, entry.CanonicalActionID, "send_pending", err)
 			_ = a.state.ReleaseOutboxLease(ctx, actionID)
@@ -671,6 +693,7 @@ type responsePayload struct {
 	Text          string                 `json:"text"`
 	Entities      []telego.MessageEntity `json:"entities,omitempty"`
 	Operation     string                 `json:"operation"`
+	ReplyTo       int                    `json:"reply_to,omitempty"`
 	FallbackText  string                 `json:"fallback_text,omitempty"`
 	FallbackItems []telego.MessageEntity `json:"fallback_entities,omitempty"`
 }
@@ -756,6 +779,22 @@ func safeHost(raw string) string {
 		return "invalid-url"
 	}
 	return u.Hostname()
+}
+
+func safeLogURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "invalid-url"
+	}
+	u.User = nil
+	if u.RawQuery != "" {
+		query := u.Query()
+		for key := range query {
+			query.Set(key, "[redacted]")
+		}
+		u.RawQuery = query.Encode()
+	}
+	return u.String()
 }
 
 // classifyFetchError reduces a metadata fetch error to a short stable label
@@ -884,8 +923,8 @@ func urlHasQuery(raw string) bool {
 }
 
 // emitTerminalDecision writes the per-message decision summary plus the
-// correlated per-URL reasoning logs. Sensitive URL data is reduced to host
-// plus a query-presence flag; full URLs are not recorded.
+// correlated per-URL reasoning logs. Query values and credentials are redacted
+// while the URL path remains available for operational diagnosis.
 func (a *Application) emitTerminalDecision(trace *urlTrace, started time.Time) {
 	if trace == nil {
 		return
@@ -934,6 +973,7 @@ func (a *Application) emitTerminalDecision(trace *urlTrace, started time.Time) {
 			fieldMessageID, trace.input.MessageID,
 			fieldURLIndex, decision.index,
 			fieldURLHost, decision.host,
+			fieldURL, safeLogURL(decision.raw),
 			fieldURLHasQuery, decision.hasQuery,
 			fieldResolverName, decision.resolverName,
 			fieldResolverMatched, decision.resolverMatched,

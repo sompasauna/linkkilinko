@@ -20,6 +20,4 @@ preview.missing: |-
 
 # Link-only post with previews explicitly disabled and useful metadata found.
 preview.enriched: |-
-  Käyttäjä {sender} lähetti linkin {url} ilman esikatselutietoja. Esikatselutiedot haettiin automaattisesti tähän viestiin.
-
   {metadata}
