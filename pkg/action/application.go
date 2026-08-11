@@ -182,9 +182,41 @@ func (a *Application) Process(ctx context.Context, input moderation.Input) error
 		}
 	}
 	if plan, ok := moderation.NewcomerPlan(input, membership.JoinedAt, a.clock(), time.Duration(a.config.Moderation.NewcomerSandbox)); ok {
-		return a.applyPlan(ctx, input, plan)
+		return a.moderateNewcomer(ctx, input, plan)
 	}
 	return a.moderateLinks(ctx, input)
+}
+
+// moderateNewcomer runs the newcomer sandbox branch and emits the per-message
+// decision and per-URL reasoning logs for URL-bearing newcomer messages. The
+// sandbox short-circuits resolver and metadata calls, so the recorded
+// outcomes are delete for a first-time violation and duplicate when an
+// already-moderated canonical action suppresses this repost.
+func (a *Application) moderateNewcomer(ctx context.Context, input moderation.Input, plan moderation.Plan) error {
+	urls := moderation.ExtractURLs(input)
+	if len(urls) == 0 {
+		return a.applyPlan(ctx, input, plan)
+	}
+	started := a.now()
+	trace := newURLTrace(input, urls, a.now)
+	canonical, found, err := a.state.FindCanonical(ctx, input.ChatID, input.ThreadID, input.SenderID, plan.Rule, behaviorVersion, plan.Fingerprint)
+	if err != nil {
+		return err
+	}
+	if found {
+		for index := range urls {
+			trace.recordOutcome(index, outcomeDuplicate)
+		}
+		trace.recordMessageOutcome(outcomeDuplicate, "newcomer-sandbox")
+		a.emitTerminalDecision(trace, started)
+		return a.suppressDuplicate(ctx, input, canonical)
+	}
+	for index := range urls {
+		trace.recordOutcome(index, outcomeDelete)
+	}
+	trace.recordMessageOutcome(outcomeDelete, "newcomer-sandbox")
+	a.emitTerminalDecision(trace, started)
+	return a.applyPlan(ctx, input, plan)
 }
 
 func (a *Application) moderateLinks(ctx context.Context, input moderation.Input) error {
