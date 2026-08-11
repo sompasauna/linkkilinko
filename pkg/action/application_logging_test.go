@@ -319,3 +319,105 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	}
 	return parsed
 }
+
+// TestModerationLogsNewcomerURLDecision is t-023 regression coverage: a
+// newcomer-sandbox deletion of a URL-bearing message must emit a terminal
+// moderation decision and one per-URL reasoning line, the same as any
+// other moderator outcome. Previously Application.Process returned
+// immediately after applyPlan for the newcomer branch, leaving these
+// messages absent from the structured decision log.
+func TestModerationLogsNewcomerURLDecision(t *testing.T) {
+	t.Parallel()
+	links := &fakeLinks{}
+	md := &fakeMetadata{docs: map[string]preview.Document{}}
+	pv := &fakePreviews{}
+	handler := &capturedLogHandler{}
+	logger := slog.New(handler)
+	tc := &fakeTelegram{}
+	st := newFakeStore()
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	app.SetLogger(logger)
+	// Sender joined inside the sandbox window so the newcomer rule fires.
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-1 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, ThreadID: 2, MessageID: 20, SenderID: 100, SenderName: alice,
+		Text:     exampleURL,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(exampleURL), URL: exampleURL}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+		return r["message_id"] == int64(20)
+	})
+	if got := summary["outcome"]; got != "delete" {
+		t.Errorf("outcome = %v, want delete", got)
+	}
+	if got := summary["rule"]; got != "newcomer-sandbox" {
+		t.Errorf("rule = %v, want newcomer-sandbox", got)
+	}
+	if got := summary["url_count"]; got != int64(1) {
+		t.Errorf("url_count = %v, want 1", got)
+	}
+	if _, ok := summary["duration_ms"]; !ok {
+		t.Errorf("duration_ms missing from newcomer summary: %+v", summary)
+	}
+	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+		return r["message_id"] == int64(20) && r["url_index"] == int64(0)
+	})
+	if reasoning == nil {
+		t.Fatal("expected url reasoning log for newcomer URL")
+	}
+	if got := reasoning["url_host"]; got != exampleHost {
+		t.Errorf("url_host = %v, want %v", got, exampleHost)
+	}
+	if got := reasoning["outcome"]; got != "delete" {
+		t.Errorf("per-URL outcome = %v, want delete", got)
+	}
+}
+
+// TestModerationLogsNewcomerDuplicateSuppressed guards the duplicate branch
+// of moderateNewcomer: an unchanged repost inside the sandbox window must
+// be logged as outcome=duplicate_suppressed and must not invoke the
+// resolver or the metadata fetcher.
+func TestModerationLogsNewcomerDuplicateSuppressed(t *testing.T) {
+	t.Parallel()
+	links := &fakeLinks{}
+	md := &fakeMetadata{docs: map[string]preview.Document{}}
+	pv := &fakePreviews{}
+	handler := &capturedLogHandler{}
+	logger := slog.New(handler)
+	tc := &fakeTelegram{}
+	st := newFakeStore()
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	app.SetLogger(logger)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-1 * time.Hour)}
+	first := moderation.Input{
+		ChatID: 1, ThreadID: 2, MessageID: 21, SenderID: 100, SenderName: alice,
+		Text:     exampleURL,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(exampleURL), URL: exampleURL}},
+	}
+	if err := app.Process(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	// Process a second message carrying the same URLs to trigger canonical
+	// suppression. A distinct MessageID lets the test locate the second
+	// decision log without depending on record ordering.
+	second := moderation.Input{
+		ChatID: 1, ThreadID: 2, MessageID: 22, SenderID: 100, SenderName: alice,
+		Text:     exampleURL,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(exampleURL), URL: exampleURL}},
+	}
+	if err := app.Process(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+		return r["message_id"] == int64(22)
+	})
+	if got := summary["outcome"]; got != "duplicate_suppressed" {
+		t.Errorf("outcome = %v, want duplicate_suppressed", got)
+	}
+	if got := summary["rule"]; got != "newcomer-sandbox" {
+		t.Errorf("rule = %v, want newcomer-sandbox", got)
+	}
+}
