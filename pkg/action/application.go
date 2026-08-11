@@ -96,7 +96,6 @@ type Application struct {
 	now            func() time.Time
 	updatesSeen    atomic.Uint64
 	lastUpdateUnix atomic.Int64
-	outboxNudge    chan struct{}
 	logger         *slog.Logger
 }
 
@@ -121,6 +120,12 @@ type CanonicalPort interface {
 	RecordSuppressed(ctx context.Context, actionID int64, messageID int) error
 }
 
+// PreviewDomainPort persists hosts that have produced useful preview metadata.
+type PreviewDomainPort interface {
+	KnownGoodPreviewDomain(ctx context.Context, host string) (bool, error)
+	RecordKnownGoodPreviewDomain(ctx context.Context, host string) error
+}
+
 // OutboxPort contains the durable outbox operations that deliver moderation
 // responses exactly once.
 type OutboxPort interface {
@@ -140,6 +145,7 @@ type OutboxPort interface {
 type StorePort interface {
 	MembershipPort
 	CanonicalPort
+	PreviewDomainPort
 	OutboxPort
 }
 
@@ -348,6 +354,17 @@ func (a *Application) moderatePreviewTraced(ctx context.Context, input moderatio
 	trace.markPreviewPhase()
 	var previews []preview.Metadata
 	for index, candidate := range urls {
+		host := safeHost(candidate.Target)
+		knownGood, err := a.state.KnownGoodPreviewDomain(ctx, host)
+		if err != nil {
+			return moderation.Plan{}, false
+		}
+		if knownGood && !input.PreviewDisabled {
+			previews = append(previews, preview.Metadata{Title: "known-good", Host: host})
+			trace.recordMetadata(index, previewProviderLabel, true, false, "known_good_domain")
+			trace.recordOutcome(index, outcomePreviewUseful)
+			continue
+		}
 		document, err := a.fetchMetadata(ctx, candidate.Target)
 		if err != nil {
 			a.logger.Warn("link metadata fetch failed",
@@ -365,6 +382,11 @@ func (a *Application) moderatePreviewTraced(ctx context.Context, input moderatio
 		}
 		metadata, _ := a.previews.Inspect(document)
 		previews = append(previews, metadata)
+		if metadata.Useful() {
+			if err := a.state.RecordKnownGoodPreviewDomain(ctx, host); err != nil {
+				return moderation.Plan{}, false
+			}
+		}
 		trace.recordMetadata(index, previewProviderLabel, metadata.Useful(), false, "")
 		trace.recordOutcome(index, outcomePreviewUseful)
 	}
@@ -457,7 +479,6 @@ func (a *Application) applyPlan(ctx context.Context, input moderation.Input, pla
 	if !created {
 		return a.suppressDuplicate(ctx, input, action)
 	}
-	a.nudgeOutbox()
 	if payload.Operation == operationCopyMedia {
 		return a.applyMediaAction(ctx, input, action, payload)
 	}
@@ -624,18 +645,7 @@ func (a *Application) outboxLoop(ctx context.Context) {
 			if err := a.retryOutbox(ctx); err != nil {
 				slog.Warn("outbox worker failed", "error", err)
 			}
-		case <-a.outboxNudge:
-			if err := a.retryOutbox(ctx); err != nil {
-				slog.Warn("nudged outbox worker failed", "error", err)
-			}
 		}
-	}
-}
-
-func (a *Application) nudgeOutbox() {
-	select {
-	case a.outboxNudge <- struct{}{}:
-	default:
 	}
 }
 
@@ -955,7 +965,7 @@ func New(cfg config.Config, client TelegramPort, state StorePort, metadataFetche
 	return &Application{
 		config: cfg, client: client, state: state,
 		metadata: metadataFetcher, links: links, previews: previews, notices: notices,
-		now: now, outboxNudge: make(chan struct{}, 1),
+		now:    now,
 		logger: slog.Default().With(fieldSubsystem, "moderation"),
 	}
 }

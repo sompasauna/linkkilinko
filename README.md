@@ -32,6 +32,19 @@ resolve, delete the original, then post a bot-authored replacement. That is why
 the replacement always names the original sender: the message has changed hands,
 and attribution is what keeps the conversation legible.
 
+### Why Not Use a Hosted Bot?
+
+A search did not find a hosted bot that does this particular job. There are
+hosted bots that provide URL blacklisting, but using a closed-source third-party
+bot may be worse for privacy: instead of users occasionally clicking a tracking
+URL, the group would send all of its messages, usernames, and other metadata to
+a bot that must be made an administrator.
+
+Hosted bots also tend to bring in other bells and whistles that make a group
+look like a Christmas tree for robots and less like a human conversation.
+Running linkkilinko yourself keeps the moderation code and the data path under
+the group's control.
+
 Telegram clients recognize and preview a bare address like
 `github.com/owner/repository` even with no `http://` or `https://` typed, and
 the Bot API reports it as a `url` entity the same as an explicit link. The bot

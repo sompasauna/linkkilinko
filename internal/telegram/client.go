@@ -149,6 +149,10 @@ func (c *Client) Send(ctx context.Context, chatID int64, threadID int, text stri
 		MessageThreadID: threadID,
 		Text:            text,
 		Entities:        entities,
+		// Bot-authored notices and replacements must not create a second
+		// preview for a URL they mention. The original user message is the
+		// message whose native preview policy we evaluate.
+		LinkPreviewOptions: &telego.LinkPreviewOptions{IsDisabled: true},
 	})
 	if err != nil {
 		return 0, fmt.Errorf("telegram: send message: %w", err)

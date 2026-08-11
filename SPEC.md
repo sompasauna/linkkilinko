@@ -267,13 +267,16 @@ deletes or replaces a materially distinct message, the bot persists its
 fingerprint and canonical action before deleting the source. The canonical
 action points to the single visible bot response and its outbox state.
 
-Canonical fingerprints do not expire merely because the process restarts. They
-stop suppressing when the applicable rule no longer rejects or replaces the
-message, when normalized content materially changes, when a behavior/config
-version invalidates the old decision, or when an operator explicitly clears the
-canonical action. In particular, a newcomer fingerprint no longer applies once
-the sender reaches 48 hours, because the same post is then re-evaluated as
-allowed by that rule.
+Canonical fingerprints suppress reposts for four hours from the original
+moderation action. This window is evaluated from durable creation time, so it
+survives process restarts without suppressing test messages or stale decisions
+indefinitely. After the window, the message is re-evaluated and may produce a
+new canonical action. A fingerprint also stops suppressing sooner when the
+applicable rule no longer rejects or replaces the message, when normalized
+content materially changes, or when a behavior/config version invalidates the
+old decision. In particular, a newcomer fingerprint no longer applies once the
+sender reaches 48 hours, because the same post is then re-evaluated as allowed
+by that rule.
 
 ### 3. Newcomer Sandbox
 
@@ -640,8 +643,9 @@ production group by default.
 v0.1 is complete when:
 
 1. All required moderation behaviors work in a real private test group.
-2. Unchanged reposts are deleted silently across process restarts and never
-   create a second response or outbox action.
+2. Unchanged reposts within the four-hour suppression window are deleted
+   silently across process restarts and never create a second response or
+   outbox action.
 3. The Google rules are registry-based; adding a resolver or checker requires
    registration and tests, not a hostname conditional chain.
 4. Join state and in-flight replacement state survive restart.
@@ -674,6 +678,15 @@ preview policy authority. Do not add a TDLib or MTProto observer. A successful
 probe with useful metadata, an explicitly disabled preview, and a definitive
 no-metadata result remain the supported decisions; Telegram's private native
 preview-rendering result is intentionally outside this bot's scope.
+
+Hosts that produce useful metadata are persisted as known-good preview domains.
+For later link-only messages with previews enabled, an exact normalized host
+match avoids another metadata probe and leaves the message untouched. A cached
+host is considered fresh for 30 days after its last live check; stale entries
+are probed again. The cache is a performance optimization, not a trust or
+safety allowlist: Facebook,
+`fb.com`, `share.google`, and `goo.gl` (including their subdomains) can never be
+recorded as known-good domains, and tracked-link rewriting still runs first.
 
 ## Operator Recovery
 

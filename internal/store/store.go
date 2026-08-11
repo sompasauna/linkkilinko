@@ -20,6 +20,14 @@ import (
 // other callers before it is treated as abandoned and reclaimable.
 const outboxLeaseDuration = time.Minute
 
+// canonicalActionTTL bounds how long a moderation response suppresses an
+// otherwise identical repost. Update idempotency remains durable; this only
+// limits the repost-suppression window.
+const canonicalActionTTL = 4 * time.Hour
+const knownGoodPreviewTTL = 30 * 24 * time.Hour
+
+var neverTrustedPreviewDomains = []string{"facebook.com", "fb.com", "share.google", "goo.gl"}
+
 // Membership is the latest observed status for a chat member.
 type Membership struct {
 	ChatID        int64
@@ -62,6 +70,56 @@ type OutboxEntry struct {
 // Store is a concurrency-safe database/sql handle for linkkilinko state.
 type Store struct {
 	db *sql.DB
+}
+
+// KnownGoodPreviewDomain reports whether a host has recently produced useful
+// preview metadata. Hosts are matched exactly; a trusted parent never trusts
+// an unrelated subdomain.
+func (s *Store) KnownGoodPreviewDomain(ctx context.Context, host string) (bool, error) {
+	host = normalizePreviewDomain(host)
+	if host == "" || neverTrustsPreviewDomain(host) {
+		return false, nil
+	}
+	var exists int
+	checkedAfter := time.Now().Add(-knownGoodPreviewTTL).Unix()
+	err := s.db.QueryRowContext(ctx, `
+		SELECT 1 FROM known_good_preview_domains
+		WHERE host = ? AND observed_at >= ?`, host, checkedAfter).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: check known preview domain: %w", err)
+	}
+	return exists == 1, nil
+}
+
+// RecordKnownGoodPreviewDomain stores a host after a successful useful
+// metadata probe. Tracking exclusions can never enter this table.
+func (s *Store) RecordKnownGoodPreviewDomain(ctx context.Context, host string) error {
+	host = normalizePreviewDomain(host)
+	if host == "" || neverTrustsPreviewDomain(host) {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO known_good_preview_domains(host, observed_at) VALUES (?, ?)
+		ON CONFLICT(host) DO UPDATE SET observed_at = excluded.observed_at`, host, time.Now().Unix()); err != nil {
+		return fmt.Errorf("store: record known preview domain: %w", err)
+	}
+	return nil
+}
+
+func normalizePreviewDomain(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+func neverTrustsPreviewDomain(host string) bool {
+	for _, excluded := range neverTrustedPreviewDomains {
+		if host == excluded || strings.HasSuffix(host, "."+excluded) {
+			return true
+		}
+	}
+	return false
 }
 
 // RegisterOwner stores the first bootstrap owner and reports whether this call
@@ -323,13 +381,15 @@ func (s *Store) Membership(ctx context.Context, chatID, userID int64) (Membershi
 // FindCanonical looks up an active canonical action for a normalized repost.
 func (s *Store) FindCanonical(ctx context.Context, chatID int64, threadID int, userID int64, rule, behaviorVersion, fingerprint string) (CanonicalAction, bool, error) {
 	var action CanonicalAction
+	createdAfter := time.Now().Add(-canonicalActionTTL).Unix()
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, chat_id, thread_id, user_id, rule, behavior_version, fingerprint,
 		       response_message_id, response_state, payload
 		FROM canonical_actions
 		WHERE chat_id = ? AND thread_id = ? AND user_id = ? AND rule = ?
-		  AND behavior_version = ? AND fingerprint = ? AND active = 1`,
-		chatID, threadID, userID, rule, behaviorVersion, fingerprint).Scan(
+		  AND behavior_version = ? AND fingerprint = ? AND active = 1
+		  AND created_at >= ?`,
+		chatID, threadID, userID, rule, behaviorVersion, fingerprint, createdAfter).Scan(
 		&action.ID, &action.ChatID, &action.ThreadID, &action.UserID, &action.Rule,
 		&action.BehaviorVersion, &action.Fingerprint, &action.ResponseMessageID,
 		&action.ResponseState, &action.Payload)
@@ -350,14 +410,18 @@ func (s *Store) CreateCanonical(ctx context.Context, action CanonicalAction) (Ca
 		return CanonicalAction{}, false, fmt.Errorf("store: begin canonical action: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
-	result, err := transaction.ExecContext(ctx, `
+	createdAt := time.Now().Unix()
+	insert := func() (sql.Result, error) {
+		return transaction.ExecContext(ctx, `
 		INSERT INTO canonical_actions(
 			chat_id, thread_id, user_id, rule, behavior_version, fingerprint,
 			response_message_id, response_state, payload, active, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, 1, ?) 
 		ON CONFLICT(chat_id, thread_id, user_id, rule, behavior_version, fingerprint) DO NOTHING`,
-		action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion,
-		action.Fingerprint, action.Payload, time.Now().Unix())
+			action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion,
+			action.Fingerprint, action.Payload, createdAt)
+	}
+	result, err := insert()
 	if err != nil {
 		return CanonicalAction{}, false, fmt.Errorf("store: create canonical action: %w", err)
 	}
@@ -366,9 +430,36 @@ func (s *Store) CreateCanonical(ctx context.Context, action CanonicalAction) (Ca
 		return CanonicalAction{}, false, fmt.Errorf("store: create canonical rows: %w", err)
 	}
 	if rows == 0 {
-		_ = transaction.Rollback()
-		existing, _, findErr := s.FindCanonical(ctx, action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion, action.Fingerprint)
-		return existing, false, findErr
+		var existingID, existingCreatedAt int64
+		if err := transaction.QueryRowContext(ctx, `
+			SELECT id, created_at FROM canonical_actions
+			WHERE chat_id = ? AND thread_id = ? AND user_id = ? AND rule = ?
+			  AND behavior_version = ? AND fingerprint = ?`,
+			action.ChatID, action.ThreadID, action.UserID, action.Rule,
+			action.BehaviorVersion, action.Fingerprint).Scan(&existingID, &existingCreatedAt); err != nil {
+			return CanonicalAction{}, false, fmt.Errorf("store: read conflicting canonical action: %w", err)
+		}
+		if existingCreatedAt < createdAt-int64(canonicalActionTTL/time.Second) {
+			if _, err := transaction.ExecContext(ctx, `
+				UPDATE canonical_actions
+				SET active = 0, fingerprint = fingerprint || ':expired:' || id
+				WHERE id = ?`, existingID); err != nil {
+				return CanonicalAction{}, false, fmt.Errorf("store: expire canonical action: %w", err)
+			}
+			result, err = insert()
+			if err != nil {
+				return CanonicalAction{}, false, fmt.Errorf("store: recreate canonical action: %w", err)
+			}
+			rows, err = result.RowsAffected()
+			if err != nil {
+				return CanonicalAction{}, false, fmt.Errorf("store: recreate canonical rows: %w", err)
+			}
+		}
+		if rows == 0 {
+			_ = transaction.Rollback()
+			existing, _, findErr := s.FindCanonical(ctx, action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion, action.Fingerprint)
+			return existing, false, findErr
+		}
 	}
 	var created CanonicalAction
 	if err := transaction.QueryRowContext(ctx, `
@@ -646,6 +737,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			chat_id INTEGER PRIMARY KEY,
 			approved_by INTEGER NOT NULL,
 			approved_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS known_good_preview_domains (
+			host TEXT PRIMARY KEY,
+			observed_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS memberships (
 			chat_id INTEGER NOT NULL,

@@ -133,6 +133,7 @@ func (f *fakePreviews) Inspect(preview.Document) (preview.Metadata, string) {
 type fakeStore struct {
 	memberships     map[membershipKey]store.Membership
 	grandfathered   map[membershipKey]bool
+	knownGood       map[string]bool
 	canonicalActs   map[canonicalKey]store.CanonicalAction
 	nextID          int64
 	deleteRequested []int64
@@ -163,6 +164,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		memberships:   make(map[membershipKey]store.Membership),
 		grandfathered: make(map[membershipKey]bool),
+		knownGood:     make(map[string]bool),
 		canonicalActs: make(map[canonicalKey]store.CanonicalAction),
 		outbox:        make(map[int64]outboxEntry),
 	}
@@ -181,6 +183,15 @@ func (f *fakeStore) Membership(_ context.Context, chatID, userID int64) (store.M
 
 func (f *fakeStore) Grandfather(_ context.Context, chatID, userID int64) error {
 	f.grandfathered[membershipKey{chatID, userID}] = true
+	return nil
+}
+
+func (f *fakeStore) KnownGoodPreviewDomain(_ context.Context, host string) (bool, error) {
+	return f.knownGood[host], nil
+}
+
+func (f *fakeStore) RecordKnownGoodPreviewDomain(_ context.Context, host string) error {
+	f.knownGood[host] = true
 	return nil
 }
 
