@@ -4,8 +4,8 @@
 designed to:
 
 1. Replace `share.google` and legacy `goo.gl` redirect links, plus recognized
-   Google-cache and publisher AMP URLs, with direct destination URLs while
-   attributing the original sender.
+   Google-cache and publisher AMP URLs, and known tracking parameters, with
+   direct destination URLs while attributing the original sender.
 2. Require link-only posts to have useful preview metadata or explanatory text.
 3. Prevent members who joined less than 48 hours ago from posting links or media.
 
@@ -22,9 +22,17 @@ This project is dedicated to the public domain under [CC0 1.0](./LICENSE).
 A `share.google` or `goo.gl` link tells the reader nothing about where it goes,
 and it routes the click through a redirector that observes it. AMP URLs are the
 same problem in a different shape: the address in the chat is not the publisher's
-address. Replacing the wrapper with its destination keeps the link both direct
-and readable, and it leaves the URL itself as the thing a reader can judge before
-clicking.
+address. Marketing and social-sharing parameters such as `utm_*`, `fbclid`,
+`gclid`, YouTube `si`, and IS.fi `shem` add similar tracking noise without being
+needed to reach the content. Replacing wrappers and removing those known
+parameters keeps links direct and readable, while preserving parameters that
+actually select a video, timestamp, search, playlist, or article view.
+
+The parameter policy is deliberately conservative and host-aware: a bare `s`
+parameter is not removed globally, but it is removed from recognized YouTube
+hosts. The implementation is seeded from maintained privacy filter lists such
+as [AdGuard's tracking-parameter rules](https://github.com/AdguardTeam/AdguardFilters/tree/master/TrackParamFilter/sections)
+and is covered by local regression tests.
 
 The bot cannot simply edit the wrapper out. The Bot API does not permit a bot to
 edit an ordinary group message written by a user, so rewriting is necessarily

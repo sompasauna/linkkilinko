@@ -22,7 +22,7 @@ import (
 	"github.com/sompasauna/linkkilinko/pkg/core/preview"
 )
 
-const behaviorVersion = "v0.3"
+const behaviorVersion = "v0.4"
 
 // Terminal outcome categories used in moderation decision summaries so log
 // queries can filter on outcome without parsing free-form text.
@@ -460,7 +460,7 @@ func (a *Application) applyPlan(ctx context.Context, input moderation.Input, pla
 		return fmt.Errorf("notice %q rendered empty for rule %s", plan.NoticeKey, plan.Rule)
 	}
 	payload := responsePayload{Text: text, Entities: responseEntities(text, input.SenderName, input.SenderID), Operation: operationText}
-	if strings.HasPrefix(plan.Rule, "google-") && input.MediaKind != "" && input.Caption != "" {
+	if plan.NoticeKey == moderation.NoticeGoogleWrapper && input.MediaKind != "" && input.Caption != "" {
 		payload.Operation = operationCopyMedia
 		payload.Text = truncateRunes(text, captionTextLimit)
 		payload.Entities = responseEntities(payload.Text, input.SenderName, input.SenderID)
@@ -589,20 +589,14 @@ func (a *Application) retryOutbox(ctx context.Context) error {
 			entry.ResponseMessageID = responseID
 		}
 		if entry.State == "planned" || entry.State == "delete_requested" {
-			if entry.SourceMessageID <= 0 {
+			ready, prepareErr := a.prepareOutboxEntry(ctx, entry, payload)
+			if prepareErr != nil {
+				_ = a.state.ReleaseOutboxLease(ctx, actionID)
+				return prepareErr
+			}
+			if !ready {
 				_ = a.state.ReleaseOutboxLease(ctx, actionID)
 				continue
-			}
-			if payload.Operation != operationReply {
-				if err := a.client.Delete(ctx, entry.ChatID, entry.SourceMessageID); err != nil && !telegram.IsMessageNotFound(err) {
-					_ = a.markOutboxError(ctx, entry.CanonicalActionID, "delete_requested", err)
-					_ = a.state.ReleaseOutboxLease(ctx, actionID)
-					continue
-				}
-			}
-			if err := a.state.MarkSendPending(ctx, entry.CanonicalActionID); err != nil {
-				_ = a.state.ReleaseOutboxLease(ctx, actionID)
-				return err
 			}
 		}
 		if entry.ResponseMessageID != 0 {
@@ -629,6 +623,22 @@ func (a *Application) retryOutbox(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (a *Application) prepareOutboxEntry(ctx context.Context, entry store.OutboxEntry, payload responsePayload) (bool, error) {
+	if entry.SourceMessageID <= 0 {
+		return false, nil
+	}
+	if payload.Operation != operationReply {
+		if err := a.client.Delete(ctx, entry.ChatID, entry.SourceMessageID); err != nil && !telegram.IsMessageNotFound(err) {
+			_ = a.markOutboxError(ctx, entry.CanonicalActionID, "delete_requested", err)
+			return false, nil
+		}
+	}
+	if err := a.state.MarkSendPending(ctx, entry.CanonicalActionID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *Application) prepareMediaOutbox(ctx context.Context, entry store.OutboxEntry, payload responsePayload) (responsePayload, int, bool, error) {
@@ -774,27 +784,27 @@ func truncateRunes(value string, limit int) string {
 }
 
 func safeHost(raw string) string {
-	u, err := url.Parse(raw)
+	parsedURL, err := url.Parse(raw)
 	if err != nil {
 		return "invalid-url"
 	}
-	return u.Hostname()
+	return parsedURL.Hostname()
 }
 
 func safeLogURL(raw string) string {
-	u, err := url.Parse(raw)
+	parsedURL, err := url.Parse(raw)
 	if err != nil {
 		return "invalid-url"
 	}
-	u.User = nil
-	if u.RawQuery != "" {
-		query := u.Query()
+	parsedURL.User = nil
+	if parsedURL.RawQuery != "" {
+		query := parsedURL.Query()
 		for key := range query {
 			query.Set(key, "[redacted]")
 		}
-		u.RawQuery = query.Encode()
+		parsedURL.RawQuery = query.Encode()
 	}
-	return u.String()
+	return parsedURL.String()
 }
 
 // classifyFetchError reduces a metadata fetch error to a short stable label

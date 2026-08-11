@@ -23,6 +23,7 @@ const (
 	testEntityType  = "url"
 	testContentType = "text/html"
 	testShareRule   = "google-share"
+	testPageTitle   = "Example Page"
 
 	outboxStateSendPending = "send_pending"
 	outboxStateDead        = "dead"
@@ -69,10 +70,12 @@ func (f *fakeTelegram) Copy(_ context.Context, _ int64, _, _ int, _ string, _ ..
 
 type fakeNotice struct{}
 
-func (f fakeNotice) Render(key string, _ map[string]string) string {
+func (f fakeNotice) Render(key string, params map[string]string) string {
 	switch key {
 	case moderation.NoticePreviewMissing:
 		return "preview missing notice"
+	case moderation.NoticeGoogleWrapper:
+		return params["content"]
 	default:
 		return "notice"
 	}
@@ -430,7 +433,7 @@ func TestEstablishedUserLinkOnlyWithMetadataKept(t *testing.T) {
 	t.Parallel()
 	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
 		docs: map[string]preview.Document{testURL: {URL: &url.URL{Host: testURLHost}, Body: []byte("<html></html>"), ContentType: testContentType}},
-	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Example Page"}}
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: testPageTitle}}
 	app := newTestApp(tc, st, md, pv)
 	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
 	input := moderation.Input{
@@ -478,7 +481,7 @@ func TestEstablishedSchemelessLinkOnlyReachesMetadataAndPreviewPolicy(t *testing
 	canonical := "https://" + schemeless
 	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
 		docs: map[string]preview.Document{canonical: {URL: &url.URL{Host: testURLHost}, Body: []byte("<html></html>"), ContentType: testContentType}},
-	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Example Page"}}
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: testPageTitle}}
 	app := newTestApp(tc, st, md, pv)
 	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
 	input := moderation.Input{
@@ -498,7 +501,7 @@ func TestDisabledPreviewKeepsOriginalAndRepliesWithMetadata(t *testing.T) {
 		docs: map[string]preview.Document{testURL: {
 			URL: &url.URL{Host: testURLHost}, Body: []byte("<html></html>"), ContentType: testContentType,
 		}},
-	}, &fakePreviews{inspectResult: preview.Metadata{Title: "Example Page"}}
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: testPageTitle}}
 	app := newTestApp(tc, st, md, pv)
 	st.memberships[membershipKey{1, 100}] = store.Membership{
 		ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour),
@@ -769,6 +772,35 @@ func TestTrackedLinkRewritingBeforePreviewPolicy(t *testing.T) {
 	}
 	if len(md.docs) > 0 {
 		t.Error("metadata should not be fetched for wrapper URL; rewriting happens first")
+	}
+}
+
+func TestTrackingParameterRewritingDeletesAndSendsCleanedLink(t *testing.T) {
+	t.Parallel()
+	const (
+		tracked = "https://is.fi/article?shem=share-id"
+		clean   = "https://is.fi/article"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{docs: map[string]preview.Document{}}, &fakePreviews{}
+	links := &fakeLinks{destinations: map[string]string{tracked: clean}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100,
+		Text:     "read " + tracked,
+		Entities: []moderation.Entity{{Type: testEntityType, Offset: 5, Length: len(tracked), URL: tracked}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.deleteCalled) == 0 {
+		t.Fatal("tracking parameter message should be deleted before replacement")
+	}
+	if len(tc.sentCalled) == 0 {
+		t.Fatal("tracking parameter message should produce a replacement")
+	}
+	if got := tc.sentCalled[0].text; !contains(got, clean) || contains(got, "shem=") {
+		t.Errorf("replacement text = %q, want cleaned URL %q without shem", got, clean)
 	}
 }
 

@@ -161,7 +161,7 @@ func run(parent context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	linkRegistry, err := link.NewRegistry(googleShare, amp)
+	linkRegistry, err := link.NewRegistry(googleShare, amp, link.TrackingParameterResolver{})
 	if err != nil {
 		return err
 	}

@@ -23,8 +23,10 @@ const outboxLeaseDuration = time.Minute
 // canonicalActionTTL bounds how long a moderation response suppresses an
 // otherwise identical repost. Update idempotency remains durable; this only
 // limits the repost-suppression window.
-const canonicalActionTTL = 4 * time.Hour
-const knownGoodPreviewTTL = 30 * 24 * time.Hour
+const (
+	canonicalActionTTL  = 4 * time.Hour
+	knownGoodPreviewTTL = 30 * 24 * time.Hour
+)
 
 var neverTrustedPreviewDomains = []string{"facebook.com", "fb.com", "share.google", "goo.gl"}
 
@@ -411,17 +413,7 @@ func (s *Store) CreateCanonical(ctx context.Context, action CanonicalAction) (Ca
 	}
 	defer func() { _ = transaction.Rollback() }()
 	createdAt := time.Now().Unix()
-	insert := func() (sql.Result, error) {
-		return transaction.ExecContext(ctx, `
-		INSERT INTO canonical_actions(
-			chat_id, thread_id, user_id, rule, behavior_version, fingerprint,
-			response_message_id, response_state, payload, active, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, 1, ?) 
-		ON CONFLICT(chat_id, thread_id, user_id, rule, behavior_version, fingerprint) DO NOTHING`,
-			action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion,
-			action.Fingerprint, action.Payload, createdAt)
-	}
-	result, err := insert()
+	result, err := insertCanonical(ctx, transaction, action, createdAt)
 	if err != nil {
 		return CanonicalAction{}, false, fmt.Errorf("store: create canonical action: %w", err)
 	}
@@ -430,30 +422,9 @@ func (s *Store) CreateCanonical(ctx context.Context, action CanonicalAction) (Ca
 		return CanonicalAction{}, false, fmt.Errorf("store: create canonical rows: %w", err)
 	}
 	if rows == 0 {
-		var existingID, existingCreatedAt int64
-		if err := transaction.QueryRowContext(ctx, `
-			SELECT id, created_at FROM canonical_actions
-			WHERE chat_id = ? AND thread_id = ? AND user_id = ? AND rule = ?
-			  AND behavior_version = ? AND fingerprint = ?`,
-			action.ChatID, action.ThreadID, action.UserID, action.Rule,
-			action.BehaviorVersion, action.Fingerprint).Scan(&existingID, &existingCreatedAt); err != nil {
-			return CanonicalAction{}, false, fmt.Errorf("store: read conflicting canonical action: %w", err)
-		}
-		if existingCreatedAt < createdAt-int64(canonicalActionTTL/time.Second) {
-			if _, err := transaction.ExecContext(ctx, `
-				UPDATE canonical_actions
-				SET active = 0, fingerprint = fingerprint || ':expired:' || id
-				WHERE id = ?`, existingID); err != nil {
-				return CanonicalAction{}, false, fmt.Errorf("store: expire canonical action: %w", err)
-			}
-			result, err = insert()
-			if err != nil {
-				return CanonicalAction{}, false, fmt.Errorf("store: recreate canonical action: %w", err)
-			}
-			rows, err = result.RowsAffected()
-			if err != nil {
-				return CanonicalAction{}, false, fmt.Errorf("store: recreate canonical rows: %w", err)
-			}
+		rows, err = recreateExpiredCanonical(ctx, transaction, action, createdAt)
+		if err != nil {
+			return CanonicalAction{}, false, err
 		}
 		if rows == 0 {
 			_ = transaction.Rollback()
@@ -482,6 +453,47 @@ func (s *Store) CreateCanonical(ctx context.Context, action CanonicalAction) (Ca
 		return CanonicalAction{}, false, fmt.Errorf("store: commit canonical action: %w", err)
 	}
 	return created, true, nil
+}
+
+func insertCanonical(ctx context.Context, transaction *sql.Tx, action CanonicalAction, createdAt int64) (sql.Result, error) {
+	return transaction.ExecContext(ctx, `
+		INSERT INTO canonical_actions(
+			chat_id, thread_id, user_id, rule, behavior_version, fingerprint,
+			response_message_id, response_state, payload, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, 1, ?)
+		ON CONFLICT(chat_id, thread_id, user_id, rule, behavior_version, fingerprint) DO NOTHING`,
+		action.ChatID, action.ThreadID, action.UserID, action.Rule, action.BehaviorVersion,
+		action.Fingerprint, action.Payload, createdAt)
+}
+
+func recreateExpiredCanonical(ctx context.Context, transaction *sql.Tx, action CanonicalAction, createdAt int64) (int64, error) {
+	var existingID, existingCreatedAt int64
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT id, created_at FROM canonical_actions
+		WHERE chat_id = ? AND thread_id = ? AND user_id = ? AND rule = ?
+		  AND behavior_version = ? AND fingerprint = ?`,
+		action.ChatID, action.ThreadID, action.UserID, action.Rule,
+		action.BehaviorVersion, action.Fingerprint).Scan(&existingID, &existingCreatedAt); err != nil {
+		return 0, fmt.Errorf("store: read conflicting canonical action: %w", err)
+	}
+	if existingCreatedAt >= createdAt-int64(canonicalActionTTL/time.Second) {
+		return 0, nil
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		UPDATE canonical_actions
+		SET active = 0, fingerprint = fingerprint || ':expired:' || id
+		WHERE id = ?`, existingID); err != nil {
+		return 0, fmt.Errorf("store: expire canonical action: %w", err)
+	}
+	result, err := insertCanonical(ctx, transaction, action, createdAt)
+	if err != nil {
+		return 0, fmt.Errorf("store: recreate canonical action: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: recreate canonical rows: %w", err)
+	}
+	return rows, nil
 }
 
 // AttachSourceMessage records the source message associated with a newly planned action.

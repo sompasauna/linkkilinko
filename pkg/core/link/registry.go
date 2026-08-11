@@ -15,6 +15,7 @@ const (
 	ampRule         = "amp"
 	googleShareHost = "share.google"
 	legacyShortHost = "goo.gl"
+	trackingRule    = "tracking-parameter"
 	httpScheme      = "http"
 	httpsScheme     = "https"
 )
@@ -136,6 +137,10 @@ type GoogleShareResolver struct{ fetcher Fetcher }
 // AMPResolver resolves Google cache and publisher-hosted AMP URLs.
 type AMPResolver struct{ fetcher Fetcher }
 
+// TrackingParameterResolver removes known tracking parameters while retaining
+// query parameters that affect the destination or its presentation.
+type TrackingParameterResolver struct{}
+
 // NewGoogleResolvers constructs the Google share and AMP resolvers.
 func NewGoogleResolvers(fetcher Fetcher) (GoogleShareResolver, AMPResolver, error) {
 	if fetcher == nil {
@@ -149,6 +154,35 @@ func (GoogleShareResolver) Name() string { return "google-share" }
 
 // Name returns the stable resolver name.
 func (AMPResolver) Name() string { return ampRule }
+
+// Name returns the stable resolver name.
+func (TrackingParameterResolver) Name() string { return trackingRule }
+
+// Match reports whether u contains a known tracking parameter for its host.
+func (TrackingParameterResolver) Match(u *url.URL) bool {
+	return len(trackingParameters(u)) > 0
+}
+
+// Resolve removes known tracking parameters without making a network request.
+func (TrackingParameterResolver) Resolve(_ context.Context, original *url.URL) (Resolution, error) {
+	if original == nil {
+		return Resolution{}, ErrNoResolution
+	}
+	destination := cloneURL(original)
+	query := destination.Query()
+	for parameter := range trackingParameters(original) {
+		query.Del(parameter)
+	}
+	destination.RawQuery = query.Encode()
+	if destination.RawQuery == "" {
+		destination.ForceQuery = false
+	}
+	return Resolution{
+		Original:    cloneURL(original),
+		Destination: destination,
+		Resolver:    trackingRule,
+	}, nil
+}
 
 // Hosts returns the exact hosts owned by the share resolver.
 func (GoogleShareResolver) Hosts() []string { return []string{googleShareHost, legacyShortHost} }
@@ -325,6 +359,54 @@ func hasAMPQuery(query string) bool {
 		}
 	}
 	return false
+}
+
+var genericTrackingParameters = map[string]struct{}{
+	"fbclid":  {},
+	"gclid":   {},
+	"dclid":   {},
+	"gbraid":  {},
+	"wbraid":  {},
+	"mc_cid":  {},
+	"mc_eid":  {},
+	"msclkid": {},
+	"ttclid":  {},
+	"yclid":   {},
+}
+
+func trackingParameters(candidate *url.URL) map[string]struct{} {
+	if candidate == nil {
+		return nil
+	}
+	parameters := make(map[string]struct{})
+	query := candidate.Query()
+	for parameter := range query {
+		if _, ok := genericTrackingParameters[parameter]; ok || strings.HasPrefix(parameter, "utm_") {
+			parameters[parameter] = struct{}{}
+		}
+	}
+	host := strings.ToLower(strings.TrimSuffix(candidate.Hostname(), "."))
+	for parameter := range query {
+		if hostTracksParameter(host, parameter) {
+			parameters[parameter] = struct{}{}
+		}
+	}
+	return parameters
+}
+
+func hostTracksParameter(host, parameter string) bool {
+	switch {
+	case host == "is.fi" || strings.HasSuffix(host, ".is.fi"):
+		return parameter == "shem"
+	case host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "youtu.be":
+		return parameter == "si" || parameter == "pp" || parameter == "s"
+	case host == "open.spotify.com":
+		return parameter == "si"
+	case host == "instagram.com" || host == "www.instagram.com":
+		return parameter == "igshid"
+	default:
+		return false
+	}
 }
 
 func unwrapAMPCache(u *url.URL) *url.URL {

@@ -75,6 +75,46 @@ func TestGoogleShareResolverFollowsRedirect(t *testing.T) {
 	}
 }
 
+func TestTrackingParameterResolverRemovesKnownParameters(t *testing.T) {
+	t.Parallel()
+	resolver := link.TrackingParameterResolver{}
+	tests := map[string]string{
+		"https://www.is.fi/hyvaolo/art-2000011975993.html?shem=dsdf,sharefoc": "https://www.is.fi/hyvaolo/art-2000011975993.html",
+		"https://youtu.be/video?t=90s&si=share-id":                            "https://youtu.be/video?t=90s",
+		"https://youtube.com/watch?v=video&list=playlist&pp=share":            "https://youtube.com/watch?list=playlist&v=video",
+		"https://example.com/article?utm_source=newsletter&view=full":         "https://example.com/article?view=full",
+	}
+	for input, want := range tests {
+		candidate := mustURL(t, input)
+		if !resolver.Match(candidate) {
+			t.Errorf("TrackingParameterResolver.Match(%q) = false, want true", input)
+			continue
+		}
+		resolution, err := resolver.Resolve(context.Background(), candidate)
+		if err != nil {
+			t.Errorf("TrackingParameterResolver.Resolve(%q) error = %v", input, err)
+			continue
+		}
+		if got := resolution.Destination.String(); got != want {
+			t.Errorf("TrackingParameterResolver.Resolve(%q) destination = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestTrackingParameterResolverPreservesUnknownParameters(t *testing.T) {
+	t.Parallel()
+	resolver := link.TrackingParameterResolver{}
+	for _, raw := range []string{
+		"https://example.com/search?s=golang",
+		"https://youtube.com/watch?v=video&t=90s",
+		"https://is.fi/article?foo=bar",
+	} {
+		if resolver.Match(mustURL(t, raw)) {
+			t.Errorf("TrackingParameterResolver.Match(%q) = true, want false", raw)
+		}
+	}
+}
+
 func TestResolversMatchRealURLFamilies(t *testing.T) {
 	t.Parallel()
 	share, amp, err := link.NewGoogleResolvers(fakeFetcher{})
@@ -147,7 +187,7 @@ func TestRegistryReportsMatchedRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := link.NewRegistry(share, amp)
+	registry, err := link.NewRegistry(share, amp, link.TrackingParameterResolver{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +196,7 @@ func TestRegistryReportsMatchedRule(t *testing.T) {
 		"https://goo.gl/x":                               "google-share",
 		"https://www.google.com/amp/s/example.com/story": "amp",
 		"https://amp.example.com/story":                  "amp",
+		"https://youtu.be/video?si=share-id":             "tracking-parameter",
 	}
 	for raw, want := range tests {
 		got, matched := registry.MatchName(raw)

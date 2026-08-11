@@ -16,7 +16,8 @@ The bot has three core responsibilities, evaluated in this order:
 
 1. Block links and media from human members who joined the chat less than 48
    hours ago.
-2. Replace Google sharing and AMP wrapper URLs with their direct destinations.
+2. Replace Google sharing and AMP wrapper URLs with their direct destinations,
+   and remove known tracking parameters from shared URLs.
 3. Moderate link-only messages that do not provide useful preview metadata or
    explanatory text.
 
@@ -48,7 +49,7 @@ moderation loop.
 1. General spam, toxicity, or malware classification.
 2. A scam blocklist. The architecture provides a policy-check stage where one
    can be added later.
-3. URL shortening or broad removal of arbitrary query parameters.
+3. URL shortening or broad removal of arbitrary, unrecognized query parameters.
 4. Editing messages sent by users; ordinary Bot API group messages cannot be
    edited by the bot.
 5. Rehosting arbitrary remote images or videos to manufacture rich previews.
@@ -308,12 +309,14 @@ durable membership storage are required for full Daysandbox parity.
 ### 4. Tracked-Link Rewriting
 
 If any extracted URL has an exact normalized host of `share.google` or `goo.gl`,
-matches a Google or AMP Project cache URL shape, or is recognized as a
-publisher-hosted AMP URL by a registered rule:
+matches a Google or AMP Project cache URL shape, is recognized as a
+publisher-hosted AMP URL by a registered rule, or contains a known tracking
+parameter:
 
 1. Resolve every matched URL before deleting anything.
 2. Accept only a valid public HTTP or HTTPS destination outside the matched
-   wrapper host that passes all URL safety checks.
+   wrapper host that passes all URL safety checks. Parameter removal is a
+   deterministic local transformation and does not require a network request.
 3. Replace only the URL entity span. Preserve surrounding user text and safe
    formatting entities where possible.
 4. Delete the original only after the complete replacement payload and durable
@@ -417,6 +420,11 @@ The initial registry contains:
    fetches the page and accepts a non-AMP HTML canonical URL. Inconclusive
    heuristic rewrites are not accepted merely because an AMP-looking path can
    be stripped.
+3. `tracking-parameter`: removes conservative generic parameters such as
+   `utm_*`, `fbclid`, `gclid`, and `ttclid`, plus exact host rules for parameters
+   such as YouTube `si`, `pp`, and `s`, IS.fi `shem`, Spotify `si`, and Instagram
+   `igshid`. Meaningful parameters such as YouTube `v`, `t`, `list`, and `index`
+   are preserved. The rule is local and deterministic.
 
 Safe generic redirects and metadata retrieval are provided by the hardened
 fetcher, not by a catch-all resolver. A resolver that matches every URL would
