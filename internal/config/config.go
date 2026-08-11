@@ -79,6 +79,36 @@ func Defaults() Config {
 
 // Load reads, defaults, resolves the token, and validates a YAML config file.
 func Load(path string) (Config, error) {
+	config, err := parseFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	if config.Telegram.Token == "" {
+		config.Telegram.Token = os.Getenv("LINKKILINKO_TELEGRAM_TOKEN")
+	}
+	if err := config.Validate(); err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+// LoadDatabasePath parses the YAML config and returns only the configured
+// SQLite path. It is intended for operator commands that act on the
+// database directly without starting the bot and therefore do not need a
+// Telegram token. Unknown YAML fields are still rejected so a typo is
+// caught at the operator command line as well.
+func LoadDatabasePath(path string) (string, error) {
+	config, err := parseFile(path)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(config.Database.Path) == "" {
+		return "", errors.New("config: database path is empty")
+	}
+	return config.Database.Path, nil
+}
+
+func parseFile(path string) (Config, error) {
 	config := Defaults()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,12 +118,6 @@ func Load(path string) (Config, error) {
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
-	}
-	if config.Telegram.Token == "" {
-		config.Telegram.Token = os.Getenv("LINKKILINKO_TELEGRAM_TOKEN")
-	}
-	if err := config.Validate(); err != nil {
-		return Config{}, err
 	}
 	return config, nil
 }

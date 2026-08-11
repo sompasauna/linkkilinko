@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/mymmrac/telego"
+	"github.com/sompasauna/linkkilinko/internal/store"
 )
 
 func TestResponseEntitiesUsesUTF16OffsetsAndUserID(t *testing.T) {
@@ -64,5 +68,96 @@ func TestGroupChatRecognition(t *testing.T) {
 	}
 	if isGroupChat(telego.ChatTypePrivate) {
 		t.Fatal("private chats must not be recognized as groups")
+	}
+}
+
+// openOperatorStore returns an in-memory store populated for operator-mode
+// tests. Returning a cleanup keeps the helper aligned with the rest of the
+// suite and prevents leaked handles during parallel runs.
+func openOperatorStore(t *testing.T) *store.Store {
+	t.Helper()
+	state, err := store.Open(context.Background(), "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	return state
+}
+
+// TestOperatorResetOwnerAndRebootstrap is the t-017 done-when requirement
+// expressed at the operator layer: -reset-owner clears the persisted owner
+// and the next RegisterOwner call succeeds with a different user id, while
+// approved chats recorded under the previous owner survive.
+func TestOperatorResetOwnerAndRebootstrap(t *testing.T) {
+	ctx := context.Background()
+	state := openOperatorStore(t)
+	if _, err := state.RegisterOwner(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApproveChat(ctx, -1001, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyResetOwner(ctx, state); err != nil {
+		t.Fatalf("applyResetOwner: %v", err)
+	}
+	if _, found, err := state.Owner(ctx); err != nil || found {
+		t.Fatalf("owner after reset: found=%v err=%v, want no owner", found, err)
+	}
+	if approved, err := state.ApprovedChat(ctx, -1001); err != nil || !approved {
+		t.Fatalf("approved chat must survive owner reset: approved=%v err=%v", approved, err)
+	}
+	registered, err := state.RegisterOwner(ctx, 99)
+	if err != nil || !registered {
+		t.Fatalf("post-reset RegisterOwner = (%v, %v), want (true, nil)", registered, err)
+	}
+}
+
+// TestOperatorResetOwnerWithoutOwnerFails ensures the operator action
+// exits non-zero with a clear message when there is no owner to reset.
+func TestOperatorResetOwnerWithoutOwnerFails(t *testing.T) {
+	state := openOperatorStore(t)
+	err := applyResetOwner(context.Background(), state)
+	if err == nil {
+		t.Fatal("expected an error when no owner is registered")
+	}
+	if !errors.Is(err, err) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestOperatorApproveChatRequiresOwner covers the migration case: an
+// operator must register an owner before -approve-chat can succeed.
+func TestOperatorApproveChatRequiresOwner(t *testing.T) {
+	state := openOperatorStore(t)
+	err := applyApproveChat(context.Background(), state, -1001)
+	if err == nil {
+		t.Fatal("expected an error when approving a chat without an owner")
+	}
+}
+
+// TestOperatorApproveChatUsesOwner covers the success path: -approve-chat
+// records the chat as approved with the existing owner as the approver.
+func TestOperatorApproveChatUsesOwner(t *testing.T) {
+	ctx := context.Background()
+	state := openOperatorStore(t)
+	if _, err := state.RegisterOwner(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyApproveChat(ctx, state, -1001); err != nil {
+		t.Fatalf("applyApproveChat: %v", err)
+	}
+	approved, err := state.ApprovedChat(ctx, -1001)
+	if err != nil || !approved {
+		t.Fatalf("ApprovedChat(-1001) = (%v, %v), want (true, nil)", approved, err)
+	}
+}
+
+// TestOperatorRejectsMutuallyExclusiveFlags ensures runOperator does not
+// silently no-op when both flags are passed (or neither flag is set).
+func TestOperatorRejectsMutuallyExclusiveFlags(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	if err := runOperator(ctx, filepath.Join(directory, "missing.yaml"), true, true, 0); err == nil {
+		t.Fatal("expected an error when both flags are set")
 	}
 }

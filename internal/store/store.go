@@ -96,6 +96,25 @@ func (s *Store) Owner(ctx context.Context) (int64, bool, error) {
 	return userID, true, nil
 }
 
+// ResetOwner clears the persisted bootstrap owner so the next private
+// /start registers a fresh one. Approved chat rows are not affected: an
+// operator who resets an owner to recover from a wrong claim keeps every
+// group the bot was already trusted to moderate. The returned bool is true
+// only when an owner row actually existed and was removed.
+func (s *Store) ResetOwner(ctx context.Context) (int64, bool, error) {
+	previous, found, err := s.Owner(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if !found {
+		return 0, false, nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM bot_owner WHERE id = 1`); err != nil {
+		return previous, false, fmt.Errorf("store: reset owner: %w", err)
+	}
+	return previous, true, nil
+}
+
 // ApproveChat records a group approved by the bootstrap owner.
 func (s *Store) ApproveChat(ctx context.Context, chatID, approvedBy int64) error {
 	if chatID == 0 || approvedBy <= 0 {

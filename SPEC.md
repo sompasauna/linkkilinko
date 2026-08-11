@@ -674,3 +674,33 @@ preview policy authority. Do not add a TDLib or MTProto observer. A successful
 probe with useful metadata, an explicitly disabled preview, and a definitive
 no-metadata result remain the supported decisions; Telegram's private native
 preview-rendering result is intentionally outside this bot's scope.
+
+## Operator Recovery
+
+The owner is durable: the first private `/start` registers that sender, and
+later claims are rejected. Two operational scenarios lock the deployment out
+without an explicit recovery path:
+
+1. The wrong user claims the bot first. The bot username is discoverable as
+   soon as it is created, and the registration is permanent.
+2. The owner account is deleted, banned, or otherwise unreachable. Existing
+   approvals keep working, but no new group can ever be approved.
+
+Group moderation stays command-free, and a chat-based reset would be exactly
+the attack surface the bootstrap design avoids. Recovery is therefore an
+**out-of-band operator action** through two CLI flags that operate directly on
+the SQLite database and exit without starting the bot:
+
+1. `-reset-owner` clears the persisted owner so the next private `/start`
+   re-bootstraps. Approved chat rows are not affected: every group the bot
+   was already trusted to moderate stays moderated.
+2. `-approve-chat <id>` seeds a chat as approved using the existing owner as
+   the approver. The chat is moderated on the next normal start; no Telegram
+   interaction is required. The flag refuses to run when no owner is
+   registered, since there is then no one who could have approved it.
+
+Both flags gate on filesystem access to the database, which is the same
+trust boundary that editing the configuration file already assumes, and log
+the previous and new state at `slog.Warn` so the recovery action is visible
+in operational history. Neither flag is reachable through a Telegram
+interaction.

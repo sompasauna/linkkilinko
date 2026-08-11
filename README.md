@@ -70,6 +70,36 @@ restarts. Groups added by anyone else stay inert.
 
 There are no commands in groups. Private `/start` is the only interaction.
 
+### Operator Recovery
+
+The owner is durable: once registered, it is never replaced by another
+`/start`. Two scenarios lock the deployment out without an explicit recovery
+path:
+
+1. The wrong user claims the bot first.
+2. The owner account is deleted or otherwise unreachable.
+
+Two CLI flags operate directly on the SQLite database and exit without
+starting the bot, gating access by the same filesystem boundary that
+already protects the configuration file:
+
+```bash
+go run ./cmd/linkkilinko -config config.yaml -reset-owner
+go run ./cmd/linkkilinko -config config.yaml -approve-chat -100200300400500
+```
+
+`-reset-owner` clears the persisted owner so the next private `/start`
+re-bootstraps. Approved chat rows are not touched, so every group the bot
+was already trusted to moderate stays moderated.
+
+`-approve-chat <id>` seeds a chat as approved using the existing owner as
+the approver. The chat is moderated on the next normal start; no Telegram
+interaction is required. The flag refuses to run when no owner is
+registered, since there is then no one who could have approved it.
+
+Both flags emit a `slog.Warn` line with the previous and new state so the
+recovery action is visible in operational history.
+
 ## Configuration
 
 Copy [config.example.yaml](./config.example.yaml) and set the token through
