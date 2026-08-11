@@ -23,15 +23,16 @@ A `share.google` or `goo.gl` link tells the reader nothing about where it goes,
 and it routes the click through a redirector that observes it. AMP URLs are the
 same problem in a different shape: the address in the chat is not the publisher's
 address. Marketing and social-sharing parameters such as `utm_*`, `fbclid`,
-`gclid`, YouTube `si`, and IS.fi `shem` add similar tracking noise without being
+`gclid`, `shem`, and YouTube `si` add similar tracking noise without being
 needed to reach the content. Replacing wrappers and removing those known
 parameters keeps links direct and readable, while preserving parameters that
 actually select a video, timestamp, search, playlist, or article view.
 
-The parameter policy is deliberately conservative and host-aware: a bare `s`
-parameter is not removed globally, but it is removed from recognized YouTube
-hosts. The implementation is seeded from maintained privacy filter lists such
-as [AdGuard's tracking-parameter rules](https://github.com/AdguardTeam/AdguardFilters/tree/master/TrackParamFilter/sections)
+The parameter policy is deliberately conservative and host-aware: parameters
+with known tracking semantics, such as `shem`, are removed globally, while
+ambiguous parameters such as a bare `s` are removed only from recognized
+YouTube hosts. The implementation is seeded from maintained privacy filter
+lists such as [AdGuard's tracking-parameter rules](https://github.com/AdguardTeam/AdguardFilters/tree/master/TrackParamFilter/sections)
 and is covered by local regression tests.
 
 The bot cannot simply edit the wrapper out. The Bot API does not permit a bot to

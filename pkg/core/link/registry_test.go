@@ -111,6 +111,7 @@ func TestTrackingParameterResolverRemovesKnownParameters(t *testing.T) {
 		"https://www.is.fi/hyvaolo/art-2000011975993.html?shem=dsdf,sharefoc": "https://www.is.fi/hyvaolo/art-2000011975993.html",
 		"https://youtu.be/video?t=90s&si=share-id":                            "https://youtu.be/video?t=90s",
 		"https://youtube.com/watch?v=video&list=playlist&pp=share":            "https://youtube.com/watch?list=playlist&v=video",
+		"https://example.com/article?shem=share-id&view=full":                 "https://example.com/article?view=full",
 		"https://example.com/article?utm_source=newsletter&view=full":         "https://example.com/article?view=full",
 	}
 	for input, want := range tests {

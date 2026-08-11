@@ -183,7 +183,7 @@ func (AMPResolver) Name() string { return ampRule }
 // Name returns the stable resolver name.
 func (TrackingParameterResolver) Name() string { return trackingRule }
 
-// Match reports whether u contains a known tracking parameter for its host.
+// Match reports whether u contains a known tracking parameter.
 func (TrackingParameterResolver) Match(u *url.URL) bool {
 	return len(trackingParameters(u)) > 0
 }
@@ -389,6 +389,7 @@ func hasAMPQuery(query string) bool {
 var genericTrackingParameters = map[string]struct{}{
 	"fbclid":  {},
 	"gclid":   {},
+	"shem":    {},
 	"dclid":   {},
 	"gbraid":  {},
 	"wbraid":  {},
@@ -421,8 +422,6 @@ func trackingParameters(candidate *url.URL) map[string]struct{} {
 
 func hostTracksParameter(host, parameter string) bool {
 	switch {
-	case host == "is.fi" || strings.HasSuffix(host, ".is.fi"):
-		return parameter == "shem"
 	case host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "youtu.be":
 		return parameter == "si" || parameter == "pp" || parameter == "s"
 	case host == "open.spotify.com":

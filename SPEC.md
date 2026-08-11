@@ -421,8 +421,8 @@ The initial registry contains:
    heuristic rewrites are not accepted merely because an AMP-looking path can
    be stripped.
 3. `tracking-parameter`: removes conservative generic parameters such as
-   `utm_*`, `fbclid`, `gclid`, and `ttclid`, plus exact host rules for parameters
-   such as YouTube `si`, `pp`, and `s`, IS.fi `shem`, Spotify `si`, and Instagram
+   `utm_*`, `fbclid`, `gclid`, `shem`, and `ttclid`, plus exact host rules for
+   parameters such as YouTube `si`, `pp`, and `s`, Spotify `si`, and Instagram
    `igshid`. Meaningful parameters such as YouTube `v`, `t`, `list`, and `index`
    are preserved. The rule is local and deterministic.
 
