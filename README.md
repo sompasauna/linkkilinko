@@ -32,6 +32,15 @@ resolve, delete the original, then post a bot-authored replacement. That is why
 the replacement always names the original sender: the message has changed hands,
 and attribution is what keeps the conversation legible.
 
+Telegram clients recognize and preview a bare address like
+`github.com/owner/repository` even with no `http://` or `https://` typed, and
+the Bot API reports it as a `url` entity the same as an explicit link. The bot
+follows that recognition: the visible text stays exactly as sent, and
+`https://` is used only internally to resolve, fetch, and fingerprint it, so
+the scheme-less and explicit HTTPS spellings of the same address are moderated
+identically. An explicit non-HTTP link, such as `ftp://` or a Telegram deep
+link, is never reinterpreted this way.
+
 ### Why Not Use a Hosted Bot?
 
 A search did not find a hosted bot that does this particular job. There are
@@ -45,26 +54,14 @@ look like a Christmas tree for robots and less like a human conversation.
 Running linkkilinko yourself keeps the moderation code and the data path under
 the group's control.
 
-Telegram clients recognize and preview a bare address like
-`github.com/owner/repository` even with no `http://` or `https://` typed, and
-the Bot API reports it as a `url` entity the same as an explicit link. The bot
-follows that recognition: the visible text stays exactly as sent, and
-`https://` is used only internally to resolve, fetch, and fingerprint it, so
-the scheme-less and explicit HTTPS spellings of the same address are moderated
-identically. An explicit non-HTTP link, such as `ftp://` or a Telegram deep
-link, is never reinterpreted this way.
-
 ### Newcomer sandbox
 
 The 48-hour window replaces the separate Daysandbox bot. Link and media spam in
-open Telegram groups is overwhelmingly posted by accounts that join and post
-within minutes, so withholding links and media from accounts younger than 48
-hours in the chat removes most of it without needing to classify content. Real
-newcomers lose very little — they can talk from the first minute, and the
-restriction lifts on its own.
-
-The window also fits what Telegram allows: a bot may only delete messages up to
-48 hours old, which is ample because moderation happens as the message arrives.
+open Telegram groups or other hit-and-run activity is overwhelmingly posted by
+accounts that join and post within minutes, so withholding links and media from
+accounts younger than 48 hours in the chat removes most of it without needing
+to classify content. Real newcomers lose very little — they can talk from the
+first minute, and the restriction lifts on its own.
 
 Join times are recorded from `chat_member` updates and persisted, because
 Telegram reports a member's current status but not when they joined.
