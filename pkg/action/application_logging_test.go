@@ -22,6 +22,16 @@ const (
 	exampleHost = "example.com"
 	repoTitle   = "Repo"
 	alice       = "alice"
+
+	outcomeLabelDelete    = "delete"
+	outcomeLabelReplace   = "replace"
+	outcomeLabelDuplicate = "duplicate_suppressed"
+	outcomeLabelFailOpen  = "fail_open"
+
+	logMessageDecision = "moderation decision"
+	logMessageReason   = "url reasoning"
+
+	ruleLabelNewcomerSandbox = "newcomer-sandbox"
 )
 
 // capturedLogHandler is a slog.Handler that records every record as JSON in
@@ -103,7 +113,7 @@ func TestModerationLogsAllowedOrdinaryURL(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["chat_id"] == int64(1) && r["message_id"] == int64(10)
 	})
 	if got := summary["subsystem"]; got != "moderation" {
@@ -118,7 +128,7 @@ func TestModerationLogsAllowedOrdinaryURL(t *testing.T) {
 	if _, ok := summary["duration_ms"]; !ok {
 		t.Errorf("duration_ms missing from summary: %+v", summary)
 	}
-	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+	reasoning := handler.findRecord(t, logMessageReason, func(r map[string]any) bool {
 		return r["url_index"] == int64(0)
 	})
 	if got := reasoning["url_host"]; got != githubHost {
@@ -146,10 +156,10 @@ func TestModerationLogsPreviewDisabled(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(11)
 	})
-	if got := summary["outcome"]; got != "replace" {
+	if got := summary["outcome"]; got != outcomeLabelReplace {
 		t.Errorf("outcome = %v, want replace", got)
 	}
 	if got := summary["preview_disabled"]; got != true {
@@ -173,10 +183,10 @@ func TestModerationLogsDefinitiveNoMetadata(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(12)
 	})
-	if got := summary["outcome"]; got != "delete" {
+	if got := summary["outcome"]; got != outcomeLabelDelete {
 		t.Errorf("outcome = %v, want delete", got)
 	}
 	if got := summary["link_only"]; got != true {
@@ -199,13 +209,13 @@ func TestModerationLogsTransientMetadataFailure(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(13)
 	})
-	if got := summary["outcome"]; got != "fail_open" {
+	if got := summary["outcome"]; got != outcomeLabelFailOpen {
 		t.Errorf("outcome = %v, want fail_open", got)
 	}
-	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+	reasoning := handler.findRecord(t, logMessageReason, func(r map[string]any) bool {
 		return r["message_id"] == int64(13) && r["url_index"] == int64(0)
 	})
 	if got := reasoning["fetch_error_class"]; got != "transient_timeout" {
@@ -233,16 +243,16 @@ func TestModerationLogsMixedMultiLink(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(14)
 	})
-	if got := summary["outcome"]; got != "replace" {
+	if got := summary["outcome"]; got != outcomeLabelReplace {
 		t.Errorf("outcome = %v, want replace", got)
 	}
 	if got := summary["multi_link"]; got != false {
 		t.Errorf("multi_link = %v, want false (single URL)", got)
 	}
-	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+	reasoning := handler.findRecord(t, logMessageReason, func(r map[string]any) bool {
 		return r["message_id"] == int64(14) && r["url_index"] == int64(0)
 	})
 	if got := reasoning["resolver_name"]; got != "google-share" {
@@ -303,7 +313,7 @@ func TestModerationLogRedactsQueryPresence(t *testing.T) {
 		Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: 40, URL: "https://example.com/?token=should-stay-out"}},
 	}
 	_ = app.Process(context.Background(), input)
-	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+	reasoning := handler.findRecord(t, logMessageReason, func(r map[string]any) bool {
 		return r["message_id"] == int64(16)
 	})
 	if got := reasoning["url_has_query"]; got != true {
@@ -347,13 +357,13 @@ func TestModerationLogsNewcomerURLDecision(t *testing.T) {
 	if err := app.Process(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(20)
 	})
-	if got := summary["outcome"]; got != "delete" {
+	if got := summary["outcome"]; got != outcomeLabelDelete {
 		t.Errorf("outcome = %v, want delete", got)
 	}
-	if got := summary["rule"]; got != "newcomer-sandbox" {
+	if got := summary["rule"]; got != ruleLabelNewcomerSandbox {
 		t.Errorf("rule = %v, want newcomer-sandbox", got)
 	}
 	if got := summary["url_count"]; got != int64(1) {
@@ -362,7 +372,7 @@ func TestModerationLogsNewcomerURLDecision(t *testing.T) {
 	if _, ok := summary["duration_ms"]; !ok {
 		t.Errorf("duration_ms missing from newcomer summary: %+v", summary)
 	}
-	reasoning := handler.findRecord(t, "url reasoning", func(r map[string]any) bool {
+	reasoning := handler.findRecord(t, logMessageReason, func(r map[string]any) bool {
 		return r["message_id"] == int64(20) && r["url_index"] == int64(0)
 	})
 	if reasoning == nil {
@@ -371,7 +381,7 @@ func TestModerationLogsNewcomerURLDecision(t *testing.T) {
 	if got := reasoning["url_host"]; got != exampleHost {
 		t.Errorf("url_host = %v, want %v", got, exampleHost)
 	}
-	if got := reasoning["outcome"]; got != "delete" {
+	if got := reasoning["outcome"]; got != outcomeLabelDelete {
 		t.Errorf("per-URL outcome = %v, want delete", got)
 	}
 }
@@ -411,13 +421,13 @@ func TestModerationLogsNewcomerDuplicateSuppressed(t *testing.T) {
 	if err := app.Process(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
-	summary := handler.findRecord(t, "moderation decision", func(r map[string]any) bool {
+	summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
 		return r["message_id"] == int64(22)
 	})
-	if got := summary["outcome"]; got != "duplicate_suppressed" {
+	if got := summary["outcome"]; got != outcomeLabelDuplicate {
 		t.Errorf("outcome = %v, want duplicate_suppressed", got)
 	}
-	if got := summary["rule"]; got != "newcomer-sandbox" {
+	if got := summary["rule"]; got != ruleLabelNewcomerSandbox {
 		t.Errorf("rule = %v, want newcomer-sandbox", got)
 	}
 }
