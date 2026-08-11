@@ -320,7 +320,11 @@ func (a *Application) handleResolvedWrappersTraced(ctx context.Context, input mo
 			return a.suppressDuplicate(ctx, input, canonical)
 		}
 		previewPlan, actionable := a.moderatePreviewTraced(ctx, input, resolved, trace)
-		if actionable && (previewPlan.Action == moderation.ActionDelete || input.PreviewDisabled) {
+		// A wrapper replacement remains the canonical visible action even when
+		// the sender disabled Telegram previews. The enriched-preview plan is
+		// only appropriate for an ordinary link; applying it here would reply
+		// with metadata for the share.google URL and leave the wrapper intact.
+		if actionable && previewPlan.Action == moderation.ActionDelete {
 			return a.applyPlan(ctx, input, previewPlan)
 		}
 	}

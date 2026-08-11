@@ -775,6 +775,36 @@ func TestTrackedLinkRewritingBeforePreviewPolicy(t *testing.T) {
 	}
 }
 
+func TestTrackedLinkRewritingWinsWhenPreviewIsDisabled(t *testing.T) {
+	t.Parallel()
+	const (
+		wrapper = "https://share.google/abc"
+		target  = "https://example.com/article"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
+		docs: map[string]preview.Document{target: {URL: &url.URL{Scheme: "https", Host: "example.com", Path: "/article"}}},
+	}, &fakePreviews{inspectResult: preview.Metadata{Title: testPageTitle}}
+	links := &fakeLinks{destinations: map[string]string{wrapper: target}}
+	app := newTestAppWithLinks(tc, st, md, pv, links)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 10, SenderID: 100, PreviewDisabled: true,
+		Text: wrapper, Entities: []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(wrapper), URL: wrapper}},
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.repliedTo) != 0 {
+		t.Fatal("wrapper replacement should not be a metadata-only reply")
+	}
+	if len(tc.deleteCalled) != 1 {
+		t.Fatalf("deleted messages = %d, want 1 for wrapper replacement", len(tc.deleteCalled))
+	}
+	if len(tc.sentCalled) != 1 || !strings.Contains(tc.sentCalled[0].text, target) {
+		t.Fatalf("replacement text = %#v, want direct destination %q", tc.sentCalled, target)
+	}
+}
+
 func TestTrackingParameterRewritingDeletesAndSendsCleanedLink(t *testing.T) {
 	t.Parallel()
 	const (
