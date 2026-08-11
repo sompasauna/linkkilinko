@@ -237,11 +237,53 @@ func Fingerprint(in Input, rule string) string {
 }
 
 func normalizedText(text string, urls []URL) string {
-	text = norm.NFKC.String(strings.TrimSpace(text))
-	for _, candidate := range urls {
-		text = strings.Replace(text, candidate.Raw, normalizeURL(candidate.Target), 1)
+	if text == "" {
+		return ""
 	}
-	return text
+	type substitution struct {
+		start, end int
+		value      string
+	}
+	substitutions := make([]substitution, 0, len(urls))
+	for index := range urls {
+		candidate := urls[index]
+		if strings.TrimSpace(candidate.Raw) == "" {
+			continue
+		}
+		start, end, ok := utf16Span(text, candidate.Offset, candidate.Length)
+		if !ok || start > end || start > len(text) || end > len(text) {
+			continue
+		}
+		substitutions = append(substitutions, substitution{
+			start: start,
+			end:   end,
+			value: normalizeURL(candidate.Target),
+		})
+	}
+	if len(substitutions) == 0 {
+		return norm.NFKC.String(strings.TrimSpace(text))
+	}
+	// Substitute by entity span, descending-offset order, mirroring the
+	// overlap-safe algorithm in ReplaceURLSpans. This sidesteps the class of
+	// bug where one candidate's Raw was a substring of another's, which used
+	// to corrupt the fingerprint for messages mixing an explicit-HTTPS link
+	// and a scheme-less spelling of the same domain.
+	sort.Slice(substitutions, func(i, j int) bool { return substitutions[i].start > substitutions[j].start })
+	kept := make([]substitution, 0, len(substitutions))
+	kept = append(kept, substitutions[0])
+	for i := 1; i < len(substitutions); i++ {
+		if substitutions[i].end > kept[len(kept)-1].start {
+			// Overlapping span; valid Telegram entities never produce one,
+			// and a partial replacement is safer than fingerprint corruption.
+			continue
+		}
+		kept = append(kept, substitutions[i])
+	}
+	result := text
+	for _, sub := range kept {
+		result = result[:sub.start] + sub.value + result[sub.end:]
+	}
+	return norm.NFKC.String(strings.TrimSpace(result))
 }
 
 // NewcomerPlan returns a delete plan when the sender is inside the sandbox.
