@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -760,6 +761,65 @@ func TestSendFailureAfterSuccessfulDelete(t *testing.T) {
 	}
 	if entries[0].State != outboxStateSendPending {
 		t.Errorf("state = %q, want send_pending", entries[0].State)
+	}
+}
+
+// TestLoginWallTitleSkipsEnrichedReplace is the regression coverage for the
+// bare-site-name login-wall shape described in t-014: even when the sender
+// disabled Telegram's link preview, a fetched document whose only metadata is
+// a login-wall-shaped <title> (e.g. <title>Facebook</title> on
+// mbasic.facebook.com with no description) must not take the
+// preview-enriched replace branch. Useful() reports false for that shape and
+// the message must fall to the no-metadata delete branch instead, so the user
+// sees the preview-missing notice rather than a bot-authored reposting of the
+// login wall's title.
+func TestLoginWallTitleSkipsEnrichedReplace(t *testing.T) {
+	t.Parallel()
+	const (
+		loginWallURL  = "https://mbasic.facebook.com/share/18uiPcLZw1"
+		loginWallHost = "mbasic.facebook.com"
+	)
+	tc, st, md, pv := &fakeTelegram{}, newFakeStore(), &fakeMetadata{
+		docs: map[string]preview.Document{
+			loginWallURL: {
+				URL:         &url.URL{Scheme: "https", Host: loginWallHost, Path: "/share/18uiPcLZw1"},
+				Body:        []byte(`<title>Facebook</title>`),
+				ContentType: testContentType,
+			},
+		},
+	}, &fakePreviews{
+		// Mirrors what preview.Registry.Inspect extracts from the body above:
+		// a HTML-only <title> that matches the registrable domain, with no
+		// description, so Useful() reports false.
+		inspectResult: preview.Metadata{Title: "Facebook", Host: loginWallHost, TitleFallback: true},
+	}
+	app := newTestApp(tc, st, md, pv)
+	st.memberships[membershipKey{1, 100}] = store.Membership{ChatID: 1, UserID: 100, JoinedAt: time.Now().Add(-100 * time.Hour)}
+	input := moderation.Input{
+		ChatID: 1, MessageID: 30, SenderID: 100, SenderName: "alice",
+		Text:            loginWallURL,
+		Entities:        []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(loginWallURL), URL: loginWallURL}},
+		PreviewDisabled: true,
+	}
+	if err := app.Process(context.Background(), input); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if len(tc.deleteCalled) == 0 {
+		t.Fatal("login-wall link-only message should be deleted by the no-metadata path")
+	}
+	if len(tc.sentCalled) == 0 {
+		t.Fatal("expected the preview-missing notice to be sent")
+	}
+	if text := tc.sentCalled[0].text; text != "preview missing notice" {
+		t.Errorf("sent text = %q, want %q (enriched-replace branch must not fire for login-wall titles)", text, "preview missing notice")
+	}
+	if len(st.canonicalActs) == 0 {
+		t.Fatal("canonical action should be created for the no-metadata delete plan")
+	}
+	for _, act := range st.canonicalActs {
+		if !strings.Contains(act.Payload, "preview missing notice") {
+			t.Errorf("canonical payload should carry the preview-missing notice text, got %q", act.Payload)
+		}
 	}
 }
 
