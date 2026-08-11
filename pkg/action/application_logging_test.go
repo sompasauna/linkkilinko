@@ -167,6 +167,78 @@ func TestModerationLogsPreviewDisabled(t *testing.T) {
 	}
 }
 
+// TestModerationLogsPreviewOptionsPresence is t-025 regression coverage: the
+// terminal decision log's preview_options field must distinguish the three
+// Telegram link_preview_options states (absent, present with
+// is_disabled=false, present with is_disabled=true) rather than collapsing
+// them to the previous derived boolean. Previously the field was always true
+// for any message that reached the moderation path because the derivation
+// fell back to URL-entity presence, so a sender who explicitly enabled the
+// preview could not be distinguished from one who disabled it or who never
+// set the option at all.
+func TestModerationLogsPreviewOptionsPresence(t *testing.T) {
+	t.Parallel()
+	links := &fakeLinks{}
+	md := &fakeMetadata{docs: map[string]preview.Document{
+		githubURL: {URL: mustParseURL(t, githubURL), Body: []byte("<title>Repo</title>"), ContentType: testContentType},
+	}}
+	pv := &fakePreviews{inspectResult: preview.Metadata{Title: repoTitle, Host: githubHost, TitleFallback: true}}
+	cases := []struct {
+		name                     string
+		previewDisabled          bool
+		linkPreviewOptionsSent   bool
+		messageID                int
+		wantPreviewOptionsInLog  bool
+		wantPreviewDisabledInLog bool
+	}{
+		{
+			name:                    "absent",
+			linkPreviewOptionsSent:  false,
+			messageID:               50,
+			wantPreviewOptionsInLog: false,
+		},
+		{
+			name:                    "enabled",
+			linkPreviewOptionsSent:  true,
+			messageID:               51,
+			wantPreviewOptionsInLog: true,
+		},
+		{
+			name:                     "disabled",
+			linkPreviewOptionsSent:   true,
+			previewDisabled:          true,
+			messageID:                52,
+			wantPreviewOptionsInLog:  true,
+			wantPreviewDisabledInLog: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app, handler := newLoggedApp(t, links, md, pv)
+			input := moderation.Input{
+				ChatID: 1, ThreadID: 2, MessageID: tc.messageID, SenderID: 100, SenderName: alice,
+				Text:                      githubURL,
+				Entities:                  []moderation.Entity{{Type: testEntityType, Offset: 0, Length: len(githubURL), URL: githubURL}},
+				PreviewDisabled:           tc.previewDisabled,
+				LinkPreviewOptionsPresent: tc.linkPreviewOptionsSent,
+			}
+			if err := app.Process(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+			summary := handler.findRecord(t, logMessageDecision, func(r map[string]any) bool {
+				return r["message_id"] == int64(tc.messageID)
+			})
+			if got := summary["preview_options"]; got != tc.wantPreviewOptionsInLog {
+				t.Errorf("preview_options = %v, want %v", got, tc.wantPreviewOptionsInLog)
+			}
+			if got := summary["preview_disabled"]; got != tc.wantPreviewDisabledInLog {
+				t.Errorf("preview_disabled = %v, want %v", got, tc.wantPreviewDisabledInLog)
+			}
+		})
+	}
+}
+
 func TestModerationLogsDefinitiveNoMetadata(t *testing.T) {
 	t.Parallel()
 	links := &fakeLinks{}

@@ -47,6 +47,13 @@ type Input struct {
 	MediaUniqueID   string
 	MediaGroupID    string
 	PreviewDisabled bool
+	// LinkPreviewOptionsPresent reports whether Telegram sent a
+	// link_preview_options object on the source message. Telegram only sends
+	// the object when the sender changed a generation option (typically to
+	// disable the preview), so a false value distinguishes "Telegram never
+	// sent the object" from "object present, IsDisabled=false" -- a
+	// distinction that PreviewDisabled collapses and downstream logs need.
+	LinkPreviewOptionsPresent bool
 }
 
 // ReplaceURLSpans replaces URL entity spans without relying on visible text

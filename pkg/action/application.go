@@ -884,7 +884,7 @@ func (a *Application) emitTerminalDecision(trace *urlTrace, started time.Time) {
 	replaceIndexes := trace.urlIndexesWith(outcomeReplace)
 	deleteIndexes := trace.urlIndexesWith(outcomeDelete)
 	failOpenIndexes := trace.urlIndexesWith(outcomeFailOpen)
-	previewOptionsPresent := trace.input.PreviewDisabled || hasPreviewEntities(trace.input.Entities) || hasPreviewEntities(trace.input.CaptionEntities)
+	previewOptionsPresent := trace.input.LinkPreviewOptionsPresent
 	summary := a.logger.With(
 		fieldChatID, trace.input.ChatID,
 		fieldThreadID, trace.input.ThreadID,
@@ -947,15 +947,6 @@ func resolutionOutcomeLabel(decision urlDecision) string {
 	default:
 		return "resolver_did_not_apply"
 	}
-}
-
-func hasPreviewEntities(entities []moderation.Entity) bool {
-	for _, entity := range entities {
-		if entity.Type == "text_link" || entity.Type == "url" {
-			return true
-		}
-	}
-	return false
 }
 
 // New constructs the moderation workflow over the supplied ports. The now
