@@ -336,21 +336,22 @@ func (a *application) handleMembership(ctx context.Context, update telego.ChatMe
 func messageInput(message telego.Message) moderation.Input {
 	from := *message.From
 	return moderation.Input{
-		ChatID:          message.Chat.ID,
-		ThreadID:        message.MessageThreadID,
-		MessageID:       message.MessageID,
-		EditDate:        message.EditDate,
-		SenderID:        from.ID,
-		SenderName:      senderName(from),
-		SenderIsBot:     from.IsBot,
-		Text:            message.Text,
-		Entities:        entities(message.Entities),
-		Caption:         message.Caption,
-		CaptionEntities: entities(message.CaptionEntities),
-		MediaKind:       mediaKind(message),
-		MediaUniqueID:   mediaUniqueID(message),
-		MediaGroupID:    message.MediaGroupID,
-		PreviewDisabled: message.LinkPreviewOptions != nil && message.LinkPreviewOptions.IsDisabled,
+		ChatID:                    message.Chat.ID,
+		ThreadID:                  message.MessageThreadID,
+		MessageID:                 message.MessageID,
+		EditDate:                  message.EditDate,
+		SenderID:                  from.ID,
+		SenderName:                senderName(from),
+		SenderIsBot:               from.IsBot,
+		Text:                      message.Text,
+		Entities:                  entities(message.Entities),
+		Caption:                   message.Caption,
+		CaptionEntities:           entities(message.CaptionEntities),
+		MediaKind:                 mediaKind(message),
+		MediaUniqueID:             mediaUniqueID(message),
+		MediaGroupID:              message.MediaGroupID,
+		PreviewDisabled:           message.LinkPreviewOptions != nil && message.LinkPreviewOptions.IsDisabled,
+		LinkPreviewOptionsPresent: message.LinkPreviewOptions != nil,
 	}
 }
 
