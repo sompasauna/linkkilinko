@@ -305,3 +305,68 @@ func TestReplaceURLSpansReplacesTextLinkLabel(t *testing.T) {
 		t.Fatalf("replacement = %q, want %q", got, want)
 	}
 }
+
+// TestFingerprintMixedExplicitAndSchemelessSameDomain is t-021 regression
+// coverage: a message that mixes an explicit-HTTPS URL and a scheme-less
+// URL for the same domain must fingerprint the same as messages using
+// equivalent spellings. The substring-based normalizedText used to corrupt
+// the text= field by replacing inside the first occurrence when the
+// scheme-less Raw was found embedded in the explicit-HTTPS spelling.
+func TestFingerprintMixedExplicitAndSchemelessSameDomain(t *testing.T) {
+	t.Parallel()
+	explicit := "https://example.org/b"
+	schemeless := "example.org/b"
+	mixed := moderation.Input{
+		Text: explicit + " ja " + schemeless,
+		Entities: []moderation.Entity{
+			{Type: entityURL, Offset: 0, Length: len(explicit)},
+			{Type: entityURL, Offset: len(explicit) + 4, Length: len(schemeless)},
+		},
+	}
+	twoExplicit := moderation.Input{
+		Text: explicit + " ja " + explicit,
+		Entities: []moderation.Entity{
+			{Type: entityURL, Offset: 0, Length: len(explicit)},
+			{Type: entityURL, Offset: len(explicit) + 4, Length: len(explicit)},
+		},
+	}
+	twoSchemeless := moderation.Input{
+		Text: schemeless + " ja " + schemeless,
+		Entities: []moderation.Entity{
+			{Type: entityURL, Offset: 0, Length: len(schemeless)},
+			{Type: entityURL, Offset: len(schemeless) + 4, Length: len(schemeless)},
+		},
+	}
+	mixedFP := moderation.Fingerprint(mixed, "rule")
+	if got := moderation.Fingerprint(twoExplicit, "rule"); got != mixedFP {
+		t.Fatalf("mixed fingerprint = %s, want equal to two-explicit fingerprint %s", mixedFP, got)
+	}
+	if got := moderation.Fingerprint(twoSchemeless, "rule"); got != mixedFP {
+		t.Fatalf("mixed fingerprint = %s, want equal to two-schemeless fingerprint %s", mixedFP, got)
+	}
+}
+
+// TestFingerprintMixedURLsBoundaryWhitespaceStable covers the same root
+// cause via whitespace at the message boundaries, which TrimSpace does
+// collapse: a mixed-URL message padded with leading and trailing whitespace
+// must fingerprint the same as the trimmed form.
+func TestFingerprintMixedURLsBoundaryWhitespaceStable(t *testing.T) {
+	t.Parallel()
+	explicit := "https://example.org/b"
+	schemeless := "example.org/b"
+	makeInput := func(padding string) moderation.Input {
+		text := padding + explicit + " ja " + schemeless + padding
+		return moderation.Input{
+			Text: text,
+			Entities: []moderation.Entity{
+				{Type: entityURL, Offset: len(padding), Length: len(explicit)},
+				{Type: entityURL, Offset: len(padding) + len(explicit) + 4, Length: len(schemeless)},
+			},
+		}
+	}
+	first := moderation.Fingerprint(makeInput(""), "rule")
+	second := moderation.Fingerprint(makeInput("   "), "rule")
+	if first != second {
+		t.Fatal("mixed-URL fingerprint must be whitespace-stable at the boundaries")
+	}
+}
