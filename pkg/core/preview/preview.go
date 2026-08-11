@@ -28,17 +28,21 @@ type Metadata struct {
 }
 
 // Useful reports whether metadata is sufficient for a human-readable preview.
-// An HTML-<title>-only title is considered useful only when accompanied by a
-// description, or when it differs meaningfully from the site name or host.
+// A non-empty title is sufficient on its own when it comes from Open Graph
+// or Twitter card metadata; an HTML-<title>-only title is considered useful
+// only when accompanied by a description, or when it differs meaningfully
+// from the site name or host. A non-empty site name plus a non-empty
+// description is also sufficient, with or without a title.
 func (m Metadata) Useful() bool {
+	siteName := strings.TrimSpace(m.SiteName)
+	description := strings.TrimSpace(m.Description)
 	title := strings.TrimSpace(m.Title)
 	if title == "" {
-		return false
+		return siteName != "" && description != ""
 	}
-	if !m.TitleFallback || strings.TrimSpace(m.Description) != "" {
+	if !m.TitleFallback || description != "" {
 		return true
 	}
-	siteName := strings.TrimSpace(m.SiteName)
 	if siteName != "" && strings.EqualFold(title, siteName) {
 		return false
 	}
