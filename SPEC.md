@@ -131,6 +131,22 @@ At least a non-empty human-readable title, or a site name plus a non-empty
 description, obtained from a successful bounded metadata probe. A URL, HTTP
 status, MIME type, or image alone is not sufficient.
 
+Title provenance matters. A title lifted from the Open Graph or Twitter card
+property is authoritative for the link. A title lifted from the HTML
+`<title>` element is the fallback used only when no Open Graph or Twitter
+card title is present, and it counts as useful only when:
+
+1. it is accompanied by a non-empty description, or
+2. it differs meaningfully from the site's `og:site_name`, the registrable
+   domain, or the URL host. A `<title>` that is just the registrable domain,
+   the `og:site_name`, or the bare host is not evidence about the link and
+   does not satisfy the rule on its own.
+
+This keeps the `<title>` fallback useful for ordinary pages without Open
+Graph tags, while excluding login walls, cookie-consent interstitials,
+paywalls, and similar challenges whose only metadata is a bare site-name
+`<title>`.
+
 ### Materially identical repost
 
 A new message from the same sender in the same chat and forum topic whose
