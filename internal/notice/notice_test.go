@@ -63,6 +63,18 @@ func TestRenderSubstitutesParamsWithoutRescanning(t *testing.T) {
 	}
 }
 
+func TestRenderNewcomerSandboxIdentifiesSender(t *testing.T) {
+	t.Parallel()
+	catalog, err := notice.Load("fi")
+	if err != nil {
+		t.Fatalf("load fi: %v", err)
+	}
+	rendered := catalog.Render(moderation.NoticeNewcomerSandbox, map[string]string{"sender": "@kayttaja"})
+	if !strings.Contains(rendered, "@kayttaja") {
+		t.Errorf("Render(%q, sender) = %q, want sender mention", moderation.NoticeNewcomerSandbox, rendered)
+	}
+}
+
 func TestRenderUnknownKeyIsEmpty(t *testing.T) {
 	t.Parallel()
 	catalog, err := notice.Load("fi")

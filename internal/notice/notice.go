@@ -138,7 +138,7 @@ func validate(language string, messages map[string]string) error {
 		return fmt.Errorf("notice: catalog %q defines unknown keys: %s", language, strings.Join(unknown, ", "))
 	}
 	allowed := map[string]map[string]struct{}{
-		moderation.NoticeNewcomerSandbox: {},
+		moderation.NoticeNewcomerSandbox: {placeholderSender: {}},
 		moderation.NoticeGoogleWrapper:   {placeholderSender: {}, placeholderContent: {}},
 		moderation.NoticePreviewMissing:  {placeholderSender: {}},
 		moderation.NoticePreviewEnriched: {placeholderSender: {}, placeholderURL: {}, placeholderMetadata: {}},

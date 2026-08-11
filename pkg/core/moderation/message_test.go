@@ -261,6 +261,24 @@ func TestNewcomerPlanBoundary(t *testing.T) {
 	}
 }
 
+func TestNewcomerPlanIncludesSender(t *testing.T) {
+	t.Parallel()
+	joined := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	in := moderation.Input{
+		SenderName: "@kayttaja",
+		Text:       "https://example.test",
+		Entities:   []moderation.Entity{{Type: "url", Offset: 0, Length: len("https://example.test")}},
+	}
+
+	plan, ok := moderation.NewcomerPlan(in, joined, joined.Add(time.Hour), 48*time.Hour)
+	if !ok {
+		t.Fatalf("NewcomerPlan(%+v) returned ok = false, want true", in)
+	}
+	if got := plan.Params["sender"]; got != in.SenderName {
+		t.Errorf("NewcomerPlan(%+v) sender = %q, want %q", in, got, in.SenderName)
+	}
+}
+
 func TestFingerprintNormalizesEquivalentURLs(t *testing.T) {
 	t.Parallel()
 	first := moderation.Input{

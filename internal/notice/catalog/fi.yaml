@@ -4,7 +4,7 @@
 
 # Newcomer sandbox notice. SPEC.md "Newcomer Sandbox".
 newcomer.sandbox: |-
-  Alle 48 tuntia kanavalla olleet eivät voi lähettää mediaa tai linkkejä. Tällä estetään spämmäystä. Jos asia on tärkeä (kuvat kadonneista esineistä jne.), joku kanavalla kauemmin ollut voi auttaa välittämään sen.
+  Käyttäjä {sender}: alle 48 tuntia kanavalla olleet eivät voi lähettää mediaa tai linkkejä. Tällä estetään spämmäystä. Jos asia on tärkeä (kuvat kadonneista esineistä jne.), joku kanavalla kauemmin ollut voi auttaa välittämään sen.
 
 # Tracked-link replacement. SPEC.md "Tracked-Link Rewriting".
 google.wrapper.replacement: |-

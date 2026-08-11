@@ -113,7 +113,8 @@ const (
 // carries rendered text: the composition layer resolves a key and its
 // parameters through a language catalog.
 const (
-	// NoticeNewcomerSandbox explains the 48-hour link and media restriction.
+	// NoticeNewcomerSandbox explains the 48-hour link and media restriction and
+	// takes the {sender} parameter.
 	NoticeNewcomerSandbox = "newcomer.sandbox"
 	// NoticeGoogleWrapper introduces a replaced tracking or wrapper link and
 	// takes the {sender} and {content} parameters.
@@ -303,6 +304,7 @@ func NewcomerPlan(in Input, joinedAt, now time.Time, window time.Duration) (Plan
 		Rule:        "newcomer-sandbox",
 		Fingerprint: Fingerprint(in, "newcomer-sandbox"),
 		NoticeKey:   NoticeNewcomerSandbox,
+		Params:      map[string]string{"sender": in.SenderName},
 	}, true
 }
 
