@@ -112,17 +112,42 @@ func (r Registry) Resolve(ctx context.Context, rawURL string) (Resolution, bool,
 	if err != nil {
 		return Resolution{}, false, err
 	}
-	for _, resolver := range r.resolvers {
-		if !resolver.Match(parsed) {
-			continue
+
+	original := cloneURL(parsed)
+	matched := false
+	resolverName := ""
+	for steps := 0; steps <= len(r.resolvers); steps++ {
+		var resolver Resolver
+		for _, candidate := range r.resolvers {
+			if candidate.Match(parsed) {
+				resolver = candidate
+				break
+			}
+		}
+		if resolver == nil {
+			if !matched {
+				return Resolution{}, false, nil
+			}
+			return Resolution{Original: original, Destination: cloneURL(parsed), Resolver: resolverName}, true, nil
+		}
+
+		matched = true
+		if resolverName == "" {
+			resolverName = resolver.Name()
 		}
 		resolution, resolveErr := resolver.Resolve(ctx, parsed)
 		if resolveErr != nil {
 			return Resolution{}, true, fmt.Errorf("link: resolve with %s: %w", resolver.Name(), resolveErr)
 		}
-		return resolution, true, nil
+		if resolution.Destination == nil {
+			return Resolution{}, true, fmt.Errorf("link: resolver %s returned no destination", resolver.Name())
+		}
+		if resolution.Destination.String() == parsed.String() {
+			return Resolution{Original: original, Destination: cloneURL(parsed), Resolver: resolverName}, true, nil
+		}
+		parsed = cloneURL(resolution.Destination)
 	}
-	return Resolution{}, false, nil
+	return Resolution{}, true, errors.New("link: resolver chain exceeded its limit")
 }
 
 // Match reports whether any registered resolver owns rawURL.

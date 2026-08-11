@@ -75,6 +75,35 @@ func TestGoogleShareResolverFollowsRedirect(t *testing.T) {
 	}
 }
 
+func TestRegistryAppliesTrackingScrubberAfterWrapperResolution(t *testing.T) {
+	t.Parallel()
+	const wrapperResolver = "google-share"
+	share, amp, err := link.NewGoogleResolvers(fakeFetcher{result: link.FetchResult{
+		URL: mustURL(t, "https://is.fi/story?shem=share-id&utm_source=telegram"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := link.NewRegistry(share, amp, link.TrackingParameterResolver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolution, matched, err := registry.Resolve(context.Background(), "https://share.google/abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("registry did not match wrapper URL")
+	}
+	if got, want := resolution.Destination.String(), "https://is.fi/story"; got != want {
+		t.Errorf("destination = %q, want %q", got, want)
+	}
+	if got, want := resolution.Resolver, wrapperResolver; got != want {
+		t.Errorf("resolver = %q, want %q", got, want)
+	}
+}
+
 func TestTrackingParameterResolverRemovesKnownParameters(t *testing.T) {
 	t.Parallel()
 	resolver := link.TrackingParameterResolver{}

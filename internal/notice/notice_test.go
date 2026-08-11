@@ -58,7 +58,7 @@ func TestRenderSubstitutesParamsWithoutRescanning(t *testing.T) {
 	if strings.Count(rendered, "@kayttaja") != 1 {
 		t.Fatalf("a placeholder inside a parameter value must not be substituted again: %q", rendered)
 	}
-	if !strings.Contains(rendered, "Käyttäjien dataa mainonta- ja seurantatarkoituksiin keräävä linkki vaihdettu suoraan linkkiin.") {
+	if !strings.Contains(rendered, "Linkki, joka kerää käyttäjien tietoja mainontaa ja seurantaa varten, korvattiin suoralla linkillä.") {
 		t.Fatalf("expected the SPEC replacement introduction in %q", rendered)
 	}
 }

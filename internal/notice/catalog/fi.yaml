@@ -8,7 +8,7 @@ newcomer.sandbox: |-
 
 # Tracked-link replacement. SPEC.md "Tracked-Link Rewriting".
 google.wrapper.replacement: |-
-  Käyttäjien dataa mainonta- ja seurantatarkoituksiin keräävä linkki vaihdettu suoraan linkkiin.
+  Linkki, joka kerää käyttäjien tietoja mainontaa ja seurantaa varten, korvattiin suoralla linkillä.
 
   Käyttäjä {sender} lähetti:
   {content}

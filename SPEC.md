@@ -328,8 +328,8 @@ parameter:
 
 Replacement introduction:
 
-> Käyttäjien dataa mainonta- ja seurantatarkoituksiin keräävä linkki vaihdettu
-> suoraan linkkiin.
+> Linkki, joka kerää käyttäjien tietoja mainontaa ja seurantaa varten, korvattiin
+> suoralla linkillä.
 
 The replacement identifies the sender and reproduces the original content with
 the direct URL. For captioned media supported by Telegram `copyMessage`, the bot
