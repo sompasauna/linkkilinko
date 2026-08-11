@@ -22,7 +22,7 @@ import (
 	"github.com/sompasauna/linkkilinko/pkg/core/preview"
 )
 
-const behaviorVersion = "v0.4"
+const behaviorVersion = "v0.5"
 
 // Terminal outcome categories used in moderation decision summaries so log
 // queries can filter on outcome without parsing free-form text.
