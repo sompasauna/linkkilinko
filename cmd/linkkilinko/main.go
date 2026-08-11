@@ -33,15 +33,85 @@ const (
 
 func main() {
 	configPath := flag.String("config", envOr("LINKKILINKO_CONFIG", "config.yaml"), "YAML configuration path")
+	resetOwner := flag.Bool("reset-owner", false, "clear the persisted bot owner; exits after the write without starting the bot")
+	approveChatID := flag.Int64("approve-chat", 0, "seed chat_id as approved without bot interaction; exits after the write without starting the bot")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	if *resetOwner || *approveChatID != 0 {
+		if err := runOperator(context.Background(), *configPath, *resetOwner, *approveChatID != 0, *approveChatID); err != nil {
+			logger.Error("operator action failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	runErr := run(context.Background(), *configPath)
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		logger.Error("linkkilinko stopped", "error", runErr)
 		os.Exit(1)
 	}
+}
+
+// runOperator dispatches the out-of-band CLI actions -reset-owner and
+// -approve-chat. Both operate directly on the SQLite database and exit
+// without starting the bot or contacting Telegram.
+func runOperator(parent context.Context, configPath string, resetOwner, approveChat bool, chatID int64) error {
+	if resetOwner == approveChat {
+		return errors.New("operator: exactly one of -reset-owner or -approve-chat must be set")
+	}
+	databasePath, err := config.LoadDatabasePath(configPath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	state, err := store.Open(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = state.Close() }()
+	switch {
+	case resetOwner:
+		return applyResetOwner(ctx, state)
+	case approveChat:
+		return applyApproveChat(ctx, state, chatID)
+	default:
+		return errors.New("operator: no action selected")
+	}
+}
+
+// applyResetOwner clears the persisted bot owner so the next private /start
+// re-bootstraps. The previous owner id is recorded at slog.Warn so the
+// recovery action is visible in operational history.
+func applyResetOwner(ctx context.Context, state *store.Store) error {
+	previous, cleared, err := state.ResetOwner(ctx)
+	if err != nil {
+		return err
+	}
+	if !cleared {
+		return errors.New("operator: no bot owner registered; nothing to reset")
+	}
+	slog.Warn("reset bot owner", "subsystem", "moderation", "previous_user_id", previous, "next_user_id", "unset")
+	return nil
+}
+
+// applyApproveChat seeds a chat as approved using the existing owner as the
+// approver. The chat id and approving owner are recorded at slog.Warn so
+// the operator action is visible in operational history.
+func applyApproveChat(ctx context.Context, state *store.Store, chatID int64) error {
+	owner, found, err := state.Owner(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("operator: cannot approve chat without a registered owner; -reset-owner and a new /start must run first")
+	}
+	if err := state.ApproveChat(ctx, chatID, owner); err != nil {
+		return err
+	}
+	slog.Warn("approved chat via operator", "subsystem", "moderation", "chat_id", chatID, "approved_by", owner)
+	return nil
 }
 
 func run(parent context.Context, configPath string) error {

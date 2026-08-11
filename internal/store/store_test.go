@@ -70,6 +70,92 @@ func TestUnapprovedChatIsInert(t *testing.T) {
 	}
 }
 
+// TestResetOwnerThenRebootstrap covers the t-017 recovery flow: after a
+// -reset-owner operation clears the persisted owner, the next
+// RegisterOwner call must succeed with the new user id, and approved chats
+// recorded under the old owner must still be visible.
+func TestResetOwnerThenRebootstrap(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "state.sqlite")
+	state, err := store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RegisterOwner(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApproveChat(ctx, -1001, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.ApproveChat(ctx, -1002, 42); err != nil {
+		t.Fatal(err)
+	}
+
+	previous, cleared, err := state.ResetOwner(ctx)
+	if err != nil || !cleared || previous != 42 {
+		t.Fatalf("ResetOwner = (%d, %v, %v), want (42, true, nil)", previous, cleared, err)
+	}
+	if _, found, err := state.Owner(ctx); err != nil || found {
+		t.Fatalf("owner after reset: found=%v err=%v, want no owner", found, err)
+	}
+
+	// Approved chats must survive the owner reset.
+	for _, chatID := range []int64{-1001, -1002} {
+		approved, err := state.ApprovedChat(ctx, chatID)
+		if err != nil || !approved {
+			t.Fatalf("chat %d: approved=%v err=%v, want still approved after owner reset", chatID, approved, err)
+		}
+	}
+
+	registered, err := state.RegisterOwner(ctx, 99)
+	if err != nil || !registered {
+		t.Fatalf("post-reset RegisterOwner = (%v, %v), want (true, nil)", registered, err)
+	}
+	owner, found, err := state.Owner(ctx)
+	if err != nil || !found || owner != 99 {
+		t.Fatalf("post-reset owner = (%d, %v, %v), want (99, true, nil)", owner, found, err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart and confirm the new owner and the surviving approvals.
+	state, err = store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	owner, found, err = state.Owner(ctx)
+	if err != nil || !found || owner != 99 {
+		t.Fatalf("post-restart owner = (%d, %v, %v), want (99, true, nil)", owner, found, err)
+	}
+	for _, chatID := range []int64{-1001, -1002} {
+		approved, err := state.ApprovedChat(ctx, chatID)
+		if err != nil || !approved {
+			t.Fatalf("post-restart chat %d: approved=%v err=%v", chatID, approved, err)
+		}
+	}
+}
+
+// TestResetOwnerWithoutOwnerIsNoOp covers the error path: running the
+// recovery action against an empty database must report that there is no
+// owner to reset rather than silently doing nothing.
+func TestResetOwnerWithoutOwnerIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	state, err := store.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	previous, cleared, err := state.ResetOwner(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared || previous != 0 {
+		t.Fatalf("ResetOwner = (%d, %v), want (0, false)", previous, cleared)
+	}
+}
+
 func TestMembershipRejoinStartsNewWindow(t *testing.T) {
 	ctx := context.Background()
 	state, err := store.Open(ctx, "file::memory:?cache=shared")
